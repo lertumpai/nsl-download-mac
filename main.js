@@ -346,9 +346,12 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title }) 
 
   const proc = spawn(bin, args)
   activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
+  let capturedFilePath = ''
 
   proc.stdout.on('data', data => {
     for (const line of data.toString().split('\n')) {
+      const fp = parseFilePath(line)
+      if (fp) capturedFilePath = fp
       const p = parseYTDLPLine(line, true)
       if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
     }
@@ -362,7 +365,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title }) 
   proc.on('close', code => {
     activeDownloads.delete(id)
     if (code === 0) {
-      mainWindow?.webContents.send('download:done', { id, isAudio: true })
+      mainWindow?.webContents.send('download:done', { id, isAudio: true, filePath: capturedFilePath })
       try {
         new Notification({
           title: 'Audio Extraction Complete',
@@ -448,9 +451,12 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title }) =
 
   const proc = spawn(bin, args)
   activeDownloads.set(id, { proc, pageURL, title })
+  let capturedFilePath = ''
 
   proc.stdout.on('data', data => {
     for (const line of data.toString().split('\n')) {
+      const fp = parseFilePath(line)
+      if (fp) capturedFilePath = fp
       const p = parseYTDLPLine(line)
       if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
     }
@@ -464,7 +470,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title }) =
   proc.on('close', code => {
     activeDownloads.delete(id)
     if (code === 0) {
-      mainWindow?.webContents.send('download:done', { id })
+      mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
       try {
         new Notification({
           title: 'Download Complete',
@@ -527,6 +533,22 @@ ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
 // ---------------------------------------------------------------------------
 // Progress line parser
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// File path extractor
+// ---------------------------------------------------------------------------
+function parseFilePath(line) {
+  // "[download] Destination: /path/to/file.mp4"
+  const dest = line.match(/\[download\]\s+Destination:\s+(.+)/)
+  if (dest) return dest[1].trim()
+
+  // "[Merger] Merging formats into "/path/to/file.mp4""
+  // "[ffmpeg] Destination: /path/to/file.mp3"
+  const merger = line.match(/(?:\[Merger\].*into|(?:\[ffmpeg\]|\[ExtractAudio\]).*Destination:)\s+"?(.+?)"?\s*$/)
+  if (merger) return merger[1].trim()
+
+  return null
+}
+
 function parseYTDLPLine(line, isAudio = false) {
   if (line.includes('[ffmpeg]') || line.includes('[Merger]') || line.includes('Merging formats')) {
     return { status: isAudio ? 'extracting' : 'muxing', percent: 100, speed: '', eta: '' }

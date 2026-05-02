@@ -93,14 +93,16 @@ function bindIPCListeners() {
     renderDownloadItem(id)
   })
 
-  window.api.on('download:done', ({ id, isAudio }) => {
+  window.api.on('download:done', ({ id, isAudio, filePath }) => {
     const dl = downloads.get(id)
     if (!dl) return
-    completed.unshift({ id, title: dl.title, filePath: dl.filePath, isAudio: isAudio || dl.isAudio })
+    completed.unshift({ id, title: dl.title, filePath: filePath || dl.filePath || '', isAudio: isAudio || dl.isAudio })
     downloads.delete(id)
     renderQueued()
     renderCompleted()
-    switchTab('done')
+    if (!document.querySelector('.tab-btn[data-tab="done"]').classList.contains('active')) {
+      flashTab('done')
+    }
   })
 
   window.api.on('download:failed', ({ id, code, error }) => {
@@ -389,6 +391,9 @@ function showPlaylistPanel(url) {
             <option value="mp4" selected>MP4</option>
             <option value="mkv">MKV</option>
             <option value="webm">WebM</option>
+            <option value="mp3">MP3</option>
+            <option value="aac">AAC</option>
+            <option value="flac">FLAC</option>
           </select>
         </div>
         <button class="btn btn-primary" id="btn-dl-selected" style="margin-top:6px">↓ Download Selected</button>
@@ -459,7 +464,11 @@ async function downloadSelectedPlaylistItems() {
   if (!currentPlaylist) return
   const quality = $('pl-quality')?.value || '1080'
   const format  = $('pl-format')?.value  || 'mp4'
-  const formatSelector = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
+  
+  const isAudio = ['mp3', 'aac', 'flac'].includes(format)
+  const formatSelector = isAudio 
+    ? undefined 
+    : `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
 
   const rows = document.querySelectorAll('.pl-entry-row')
   let count = 0
@@ -468,7 +477,12 @@ async function downloadSelectedPlaylistItems() {
     if (!chk?.checked) continue
     const url   = row.dataset.entryUrl
     const title = row.querySelector('.pl-entry-title')?.textContent || 'Video'
-    await startDownload({ pageURL: url, title, formatSelector, outputFormat: format })
+    
+    if (isAudio) {
+      await extractAudioFromPage({ pageURL: url, title, audioFormat: format })
+    } else {
+      await startDownload({ pageURL: url, title, formatSelector, outputFormat: format })
+    }
     count++
   }
   if (count > 0) switchTab('queue')
