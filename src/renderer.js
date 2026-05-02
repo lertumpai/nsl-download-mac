@@ -759,14 +759,13 @@ function bindSettingsForm() {
     if (folder) { settings.saveFolder = folder; setVal('s-folder', folder) }
   })
 
-  $('btn-clear-cache')?.addEventListener('click', async () => {
+  $('btn-clear-cache')?.addEventListener('click', () => {
     if (confirm('Clear browser cache? This will remove cached images, scripts, and other data.')) {
-      try {
-        await window.api.clearCache()
+      window.api.clearCache().then(() => {
         alert('Cache cleared successfully.')
-      } catch (err) {
+      }).catch(err => {
         alert('Failed to clear cache: ' + err.message)
-      }
+      })
     }
   })
 }

@@ -761,9 +761,9 @@ ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
 // ---------------------------------------------------------------------------
 // IPC — clear cache
 // ---------------------------------------------------------------------------
-ipcMain.handle('clear-cache', async () => {
+ipcMain.handle('clear-cache', () => {
   const browserSession = session.fromPartition('persist:browser')
-  await browserSession.clearCache()
+  browserSession.clearCache().catch(console.error)
   return true
 })
 
