@@ -17,6 +17,9 @@ let playlistView    = false       // true = showing playlist panel
 let browserTabsList = []          // [{ id, url, title, loading }]
 let activeBrowserTabId = null
 
+// Library state
+let libraryFiles = []
+
 // ── Boot ─────────────────────────────────────────────────────────
 ;(async () => {
   settings = await window.api.getSettings()
@@ -30,6 +33,9 @@ let activeBrowserTabId = null
   activeBrowserTabId = id
   window.api.switchTab(id)
   renderBrowserTabs()
+
+  // Load library files
+  loadLibraryFiles()
 })()
 
 // ── Toolbar / navigation ─────────────────────────────────────────
@@ -731,6 +737,45 @@ function renderCompleted() {
   }
 }
 
+function renderLibrary() {
+  const list = $('library-list')
+  $('library-empty').style.display = libraryFiles.length ? 'none' : ''
+  list.innerHTML = ''
+
+  libraryFiles.forEach(file => {
+    const item = document.createElement('div')
+    item.className = 'library-item'
+    item.dataset.filePath = file.path
+    const canPlay = file.isVideo
+    item.innerHTML = `
+      <span class="library-icon">${file.isAudio ? '♪' : '🎥'}</span>
+      <span class="library-title" title="${esc(file.name)}">${esc(file.name)}</span>
+      <div class="library-actions">
+        ${canPlay ? `<button class="link-btn" data-action="play">▶ Play</button>` : ''}
+        <button class="link-btn" data-action="open">Open</button>
+        <button class="link-btn" data-action="finder">Finder</button>
+        <button class="link-btn danger" data-action="delete">🗑 Delete</button>
+      </div>
+    `
+    if (canPlay) {
+      item.querySelector('[data-action="play"]').addEventListener('click', () =>
+        openPlayer(file.path, file.name))
+    }
+    item.querySelector('[data-action="open"]').addEventListener('click', () =>
+      window.api.openFile(file.path))
+    item.querySelector('[data-action="finder"]').addEventListener('click', () =>
+      window.api.showFolder(file.path))
+    item.querySelector('[data-action="delete"]').addEventListener('click', () => {
+      if (confirm(`Delete "${file.name}"? This cannot be undone.`)) {
+        window.api.deleteFile(file.path)
+        libraryFiles = libraryFiles.filter(f => f.path !== file.path)
+        renderLibrary()
+      }
+    })
+    list.appendChild(item)
+  })
+}
+
 async function startRetry(dl) {
   downloads.delete(dl.id)
   document.querySelector(`[data-dl-id="${dl.id}"]`)?.remove()
@@ -832,12 +877,28 @@ function renderBrowserTabs() {
   })
 }
 
+// ── Library ───────────────────────────────────────────────────────
+async function loadLibraryFiles() {
+  try {
+    libraryFiles = await window.api.listFiles()
+    renderLibrary()
+  } catch (err) {
+    console.error('Error loading library files:', err)
+    libraryFiles = []
+    renderLibrary()
+  }
+}
+
 // ── Sidebar Tabs ──────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === name))
   document.querySelectorAll('.panel').forEach(p =>
     p.classList.toggle('active', p.id === `panel-${name}`))
+
+  if (name === 'library') {
+    loadLibraryFiles()
+  }
 }
 
 function flashTab(name) {

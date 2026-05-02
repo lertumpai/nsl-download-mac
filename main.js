@@ -734,6 +734,47 @@ ipcMain.on('ytdlp:resume', (_, id) => { activeDownloads.get(id)?.proc.kill('SIGC
 ipcMain.on('shell:openFile',   (_, p) => shell.openPath(p))
 ipcMain.on('shell:showFolder', (_, p) => shell.showItemInFolder(p))
 
+ipcMain.handle('fs:listFiles', async () => {
+  const folder = store.get('saveFolder')
+  if (!fs.existsSync(folder)) return []
+  try {
+    const files = fs.readdirSync(folder)
+      .map(name => {
+        const fullPath = path.join(folder, name)
+        const stat = fs.statSync(fullPath)
+        if (!stat.isFile()) return null
+        const ext = path.extname(name).toLowerCase()
+        const isVideo = ['.mp4', '.mkv', '.webm', '.avi', '.mov'].includes(ext)
+        const isAudio = ['.mp3', '.m4a', '.flac', '.wav', '.aac'].includes(ext)
+        if (!isVideo && !isAudio) return null
+        return {
+          name,
+          path: fullPath,
+          size: stat.size,
+          mtime: stat.mtime.getTime(),
+          isVideo,
+          isAudio
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime) // newest first
+    return files
+  } catch (err) {
+    console.error('Error listing files:', err)
+    return []
+  }
+})
+
+ipcMain.on('fs:deleteFile', (_, filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath)
+    }
+  } catch (err) {
+    console.error('Error deleting file:', err)
+  }
+})
+
 ipcMain.handle('dialog:chooseFolder', async () => {
   const r = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory', 'createDirectory']

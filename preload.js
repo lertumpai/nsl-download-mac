@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('api', {
   // File system
   openFile:    (p) => ipcRenderer.send('shell:openFile', p),
   showFolder:  (p) => ipcRenderer.send('shell:showFolder', p),
+  listFiles:   () => ipcRenderer.invoke('fs:listFiles'),
+  deleteFile:  (p) => ipcRenderer.send('fs:deleteFile', p),
   chooseFolder: () => ipcRenderer.invoke('dialog:chooseFolder'),
 
   // Settings

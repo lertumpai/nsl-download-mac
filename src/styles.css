@@ -386,6 +386,21 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 }
 .link-btn:hover { background: var(--accent-bg); }
 
+/* ── Library item ────────────────────────────────────────────────── */
+.library-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.library-icon { font-size: 14px; flex-shrink: 0; }
+.library-title {
+  flex: 1; font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.library-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.link-btn.danger { color: #e74c3c; }
+.link-btn.danger:hover { background: rgba(231, 76, 60, 0.1); }
+
 /* ── Settings panel ─────────────────────────────────────────────── */
 .settings-panel {
   padding: 12px;

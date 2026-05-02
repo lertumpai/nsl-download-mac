@@ -40,6 +40,7 @@
       <button class="tab-btn active" data-tab="detected">DETECTED</button>
       <button class="tab-btn"        data-tab="queue">QUEUE</button>
       <button class="tab-btn"        data-tab="done">DONE</button>
+      <button class="tab-btn"        data-tab="library">LIBRARY</button>
       <button class="tab-btn"        data-tab="settings">SETTINGS</button>
     </div>
 
@@ -74,6 +75,18 @@
         <p>Completed downloads appear here.</p>
       </div>
       <div id="done-list"></div>
+    </div>
+
+    <!-- Library -->
+    <div id="panel-library" class="panel">
+      <div class="empty-state" id="library-empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+          <polyline points="14,2 14,8 20,8"/>
+        </svg>
+        <p>No files in download folder.</p>
+      </div>
+      <div id="library-list"></div>
     </div>
 
     <!-- Settings -->
