@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, BrowserView, ipcMain,
+  app, BrowserWindow, BrowserView, ipcMain, Menu,
   session, shell, dialog, Notification, nativeTheme
 } = require('electron')
 const path = require('path')
@@ -164,6 +164,127 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
+// ---------------------------------------------------------------------------
+// Video overlay injection script — hover a <video> element to see the button
+// ---------------------------------------------------------------------------
+// Extract the best downloadable URL from any player framework on the page.
+// Priority: JW Player → Video.js → common config objects → video element src (skip blob:)
+const VIDEO_OVERLAY_SCRIPT = `;(function(){
+  if(window.__nslInjected)return;window.__nslInjected=true;
+
+  /* ── URL extractors ── */
+  function jwUrl(){
+    try{
+      var jw=window.jwplayer&&window.jwplayer();
+      if(!jw||!jw.getPlaylistItem)return null;
+      var item=jw.getPlaylistItem();
+      if(!item)return null;
+      var srcs=item.allSources||item.sources||[];
+      var best=srcs.find(function(x){return x.file&&/\\.m3u8/i.test(x.file)})
+              ||srcs.find(function(x){return x.file&&/\\.mp4/i.test(x.file)})
+              ||srcs.find(function(x){return x.file&&x.file.startsWith('http');});
+      return(best&&best.file)||item.file||null;
+    }catch(e){return null;}
+  }
+  function vjsUrl(){
+    try{
+      if(!window.videojs||!window.videojs.players)return null;
+      var p=Object.values(window.videojs.players).find(function(x){return x;});
+      var s=p&&p.currentSrc&&p.currentSrc();
+      return(s&&s.startsWith('http'))?s:null;
+    }catch(e){return null;}
+  }
+  function cfgUrl(){
+    var keys=['playerConfig','_playerConfig','p2pConfig','__streamConfig','streamConfig','videoConfig','nplayer_config','playerVars'];
+    for(var i=0;i<keys.length;i++){
+      try{
+        var c=window[keys[i]];if(!c)continue;
+        var u=c.url||c.src||c.hls||c.stream||c.source||c.videoUrl||c.video_url||c.hlsUrl;
+        if(u&&typeof u==='string'&&u.startsWith('http'))return u;
+      }catch(e){}
+    }
+    return null;
+  }
+  function bestUrl(video){
+    return jwUrl()||vjsUrl()||cfgUrl()||(function(){
+      var s=video?(video.currentSrc||video.src||''):'';
+      return(s&&s.startsWith('http'))?s:null;
+    })();
+  }
+
+  /* ── Floating button on <video> hover ── */
+  var btn=document.createElement('button');
+  btn.textContent='\\u2b07 Download Video';
+  btn.style.cssText='position:fixed;z-index:2147483647;background:rgba(0,0,0,.85);color:#fff;border:none;border-radius:20px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;display:none;pointer-events:auto;box-shadow:0 2px 16px rgba(0,0,0,.6);';
+  (document.body||document.documentElement).appendChild(btn);
+  var cur=null,timer=null;
+  function show(v){
+    clearTimeout(timer);cur=v;
+    var r=v.getBoundingClientRect();
+    if(r.width<80||r.height<50)return;
+    btn.style.top=Math.max(8,r.top+8)+'px';
+    btn.style.right=Math.max(8,window.innerWidth-r.right+8)+'px';
+    btn.style.display='block';
+  }
+  function hide(){timer=setTimeout(function(){btn.style.display='none';cur=null;},250);}
+  function attach(v){
+    if(v.__nslDone)return;v.__nslDone=true;
+    v.addEventListener('mouseenter',function(){show(v);});
+    v.addEventListener('mouseleave',hide);
+  }
+  btn.addEventListener('mouseenter',function(){clearTimeout(timer);});
+  btn.addEventListener('mouseleave',hide);
+  btn.addEventListener('click',function(e){
+    e.stopPropagation();
+    var u=bestUrl(cur);
+    if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);
+    btn.style.display='none';
+  });
+
+  /* ── JW Player branded button inside the player container ── */
+  function injectJWBtn(){
+    try{
+      var jw=window.jwplayer&&window.jwplayer();
+      if(!jw||!jw.getContainer)return;
+      var c=jw.getContainer();
+      if(!c||c.__nslJW)return;
+      c.__nslJW=true;
+      c.style.position=c.style.position||'relative';
+      var b=document.createElement('button');
+      b.textContent='\\u2b07 Download';
+      b.style.cssText='position:absolute;top:10px;right:10px;z-index:9999;background:rgba(0,0,0,.82);color:#fff;border:none;border-radius:16px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer;opacity:0;transition:opacity .2s;pointer-events:auto;';
+      c.appendChild(b);
+      c.addEventListener('mouseenter',function(){b.style.opacity='1';});
+      c.addEventListener('mouseleave',function(){b.style.opacity='0';});
+      b.addEventListener('click',function(e){
+        e.stopPropagation();
+        var u=jwUrl();
+        if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);
+      });
+    }catch(e){}
+  }
+
+  document.querySelectorAll('video').forEach(attach);
+  setTimeout(injectJWBtn,600);
+  setTimeout(injectJWBtn,2000); // retry for slow-loading JW Player instances
+
+  new MutationObserver(function(ms){
+    ms.forEach(function(m){m.addedNodes.forEach(function(n){
+      if(n.tagName==='VIDEO')attach(n);
+      else if(n.querySelectorAll)n.querySelectorAll('video').forEach(attach);
+    });});
+    injectJWBtn();
+  }).observe(document.documentElement,{childList:true,subtree:true});
+})();`
+
+function handleVideoDownloadRequest(videoUrl, pageUrl, pageTitle) {
+  if (!videoUrl || !pageUrl) return
+  // Record the video URL as a detected stream on this page
+  recordDetection(pageUrl, pageTitle || 'Video', 'Video', videoUrl)
+  // Tell renderer to switch to detected tab and auto-open quality picker
+  mainWindow?.webContents.send('video:auto-pick', { pageURL: pageUrl, pageTitle: pageTitle || '' })
+}
+
 function createBrowserTab(url) {
   const tabId = String(++tabIdCounter)
   const view = new BrowserView({
@@ -171,6 +292,7 @@ function createBrowserTab(url) {
       nodeIntegration: false,
       contextIsolation: true,
       partition: 'persist:browser',
+      preload: path.join(__dirname, 'preload-browser.js'),
       spellcheck: false
     }
   })
@@ -181,6 +303,33 @@ function createBrowserTab(url) {
     // Force popups/ads to open in a new tab instead of a new window
     mainWindow?.webContents.send('tab:new-requested', newUrl)
     return { action: 'deny' }
+  })
+
+  // Right-click context menu for video elements
+  view.webContents.on('context-menu', (_, params) => {
+    const items = []
+    if (params.mediaType === 'video' && params.srcURL) {
+      items.push({
+        label: '↓ Download Video with NSL',
+        click: () => handleVideoDownloadRequest(
+          params.srcURL,
+          view.webContents.getURL(),
+          view.webContents.getTitle()
+        )
+      })
+      items.push({ type: 'separator' })
+    }
+    // Always show standard browser items
+    if (params.linkURL) items.push({ label: 'Open Link in New Tab', click: () => mainWindow?.webContents.send('tab:new-requested', params.linkURL) })
+    if (params.selectionText) items.push({ label: 'Copy', role: 'copy' })
+    items.push({ label: 'Back', click: () => view.webContents.canGoBack() && view.webContents.goBack() })
+    items.push({ label: 'Reload', click: () => view.webContents.reload() })
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow })
+  })
+
+  // Inject overlay download button after each page finishes loading
+  view.webContents.on('did-stop-loading', () => {
+    view.webContents.executeJavaScript(VIDEO_OVERLAY_SCRIPT).catch(() => {})
   })
 
   // Forward browser events to renderer, tagged with tabId
@@ -304,17 +453,22 @@ function setupVideoInterception() {
 
 function classifyRequest(url, contentType) {
   // Skip tiny segments and tracking pixels
-  if (url.includes('.ts?') || url.match(/\/seg\d+\./)) return null
-  if (url.includes('doubleclick') || url.includes('analytics')) return null
+  if (url.includes('doubleclick') || url.includes('analytics') || url.includes('googletagmanager')) return null
+  // Skip TS segments (individual chunks, not the manifest)
+  if (url.match(/\/seg[-_]?\d+\.ts(\?|$)/i) || url.match(/[_-]\d{4,}\.ts(\?|$)/i)) return null
 
   const normType = (contentType || '').toLowerCase()
 
-  if (url.match(/\.m3u8(\?|$)/i) || normType.includes('mpegurl') || normType.includes('application/vnd.apple.mpegurl')) return 'HLS'
+  if (url.match(/\.m3u8(\?|$)/i) || normType.includes('mpegurl') || normType.includes('x-mpegurl')) return 'HLS'
   if (url.match(/\.mpd(\?|$)/i) || normType.includes('dash+xml')) return 'DASH'
   if (url.includes('googlevideo.com') && url.includes('videoplayback')) return 'YouTube'
   if (url.includes('video.twimg.com') && url.includes('.mp4')) return 'Twitter'
+  // JW Player CDN delivery (cdn.jwplayer.com or jwpcdn.com)
+  if ((url.includes('jwpcdn.com') || url.includes('cdn.jwplayer.com')) && url.match(/\.(m3u8|mp4)(\?|$)/i)) return 'Video'
+  // stream1689.com or similar p2p CDN domains
+  if (url.includes('stream1689.com') && url.match(/\.(m3u8|mp4|mpd)(\?|$)/i)) return 'HLS'
   if (url.match(/\.(mp4|webm|mkv|mov|ogg|ogv)(\?|$)/i)) return 'Video'
-  if (normType.startsWith('video/') && !url.includes('/seg') && !url.endsWith('.ts')) return 'Video'
+  if (normType.startsWith('video/') && !url.endsWith('.ts')) return 'Video'
   if (normType.includes('application/octet-stream') && url.match(/\.(mp4|webm|mkv|mov|ogg|ogv|m3u8|mpd)(\?|$)/i)) return 'Video'
 
   return null
@@ -375,11 +529,55 @@ async function scanDOMForVideos() {
     const found = await view.webContents.executeJavaScript(`
       (function() {
         const urls = new Set()
+
+        // Standard HTML elements
         document.querySelectorAll('video, source, iframe, a, [data-src], [data-href]').forEach(el => {
           const src = el.src || el.currentSrc || el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('data-src') || el.getAttribute('data-href')
           if (src && src.startsWith('http')) urls.add(src)
         })
 
+        // JW Player — reads actual source URLs from player API (bypasses blob: delivery)
+        if (window.jwplayer) {
+          try {
+            const jw = window.jwplayer()
+            if (jw && jw.getPlaylist) {
+              const playlist = jw.getPlaylist() || []
+              const current = jw.getPlaylistItem ? jw.getPlaylistItem() : null
+              ;[current, ...playlist].filter(Boolean).forEach(item => {
+                ;(item.allSources || item.sources || []).forEach(s => {
+                  if (s.file && s.file.startsWith('http')) urls.add(s.file)
+                })
+                if (item.file && item.file.startsWith('http')) urls.add(item.file)
+              })
+            }
+          } catch(e) {}
+        }
+
+        // Video.js
+        if (window.videojs && window.videojs.players) {
+          try {
+            Object.values(window.videojs.players).forEach(p => {
+              if (!p) return
+              const src = p.currentSrc && p.currentSrc()
+              if (src && src.startsWith('http')) urls.add(src)
+              ;(p.currentSources ? p.currentSources() : []).forEach(s => {
+                if (s.src && s.src.startsWith('http')) urls.add(s.src)
+              })
+            })
+          } catch(e) {}
+        }
+
+        // Common player config objects — covers stream1689, p2p players, custom embeds
+        ;['playerConfig','_playerConfig','p2pConfig','__streamConfig','streamConfig',
+          'videoConfig','nplayer_config','playerVars','_nativeConfig'].forEach(k => {
+          try {
+            const c = window[k]; if (!c) return
+            const u = c.url || c.src || c.hls || c.stream || c.source || c.videoUrl || c.hlsUrl || c.video_url
+            if (u && typeof u === 'string' && u.startsWith('http')) urls.add(u)
+          } catch(e) {}
+        })
+
+        // VK video URLs embedded in script tags
         const vkRegex = /(https?:)?\/\/(?:m\.)?vk\.com\/(?:video[-\d_]+|video_ext\.php\?)[^"'\s]+/g
         document.querySelectorAll('script').forEach(script => {
           const text = script.textContent || ''
@@ -468,12 +666,14 @@ ipcMain.on('tab:close', (_, tabId) => {
 // IPC — metadata fetch
 // ---------------------------------------------------------------------------
 ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
+  const cookiesPath = await exportCookies()
   return new Promise((resolve, reject) => {
     const bin = findBinary('yt-dlp')
     const pageData = detectedByPage.get(pageURL)
     const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
     const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
+    if (cookiesPath) args.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
       args.push('--add-header', `Referer: ${pageURL}`)
     }
@@ -506,6 +706,7 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
 // IPC — audio extraction
 // ---------------------------------------------------------------------------
 ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, filePrefix, customTitle }) => {
+  const cookiesPath = await exportCookies()
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
@@ -533,6 +734,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       '--newline', '--no-overwrites',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
     ]
+    if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
       a.push('--add-header', `Referer: ${pageURL}`)
       try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
@@ -637,6 +839,7 @@ ipcMain.handle('playlist:fetch', async (_, playlistURL) => {
 // IPC — download management
 // ---------------------------------------------------------------------------
 ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix, customTitle }) => {
+  const cookiesPath = await exportCookies()
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
@@ -662,6 +865,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
     ]
+    if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
       a.push('--add-header', `Referer: ${pageURL}`)
       try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
@@ -804,6 +1008,13 @@ ipcMain.handle('settings:get', () => store.store || {
 ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
 
 // ---------------------------------------------------------------------------
+// IPC — video overlay / context-menu download request
+// ---------------------------------------------------------------------------
+ipcMain.on('browser:download-request', (_, { videoUrl, pageUrl, pageTitle }) => {
+  handleVideoDownloadRequest(videoUrl, pageUrl, pageTitle)
+})
+
+// ---------------------------------------------------------------------------
 // IPC — video player
 // ---------------------------------------------------------------------------
 ipcMain.on('player:show', () => {
@@ -828,6 +1039,27 @@ ipcMain.handle('clear-cache', () => {
   return true
 })
 
+
+// ---------------------------------------------------------------------------
+// Cookie export — writes Electron session cookies in Netscape format for yt-dlp
+// ---------------------------------------------------------------------------
+async function exportCookies() {
+  try {
+    const browserSession = session.fromPartition('persist:browser')
+    const cookies = await browserSession.cookies.get({})
+    if (!cookies.length) return null
+    const lines = ['# Netscape HTTP Cookie File', '']
+    for (const c of cookies) {
+      const domain = c.domain || ''
+      const sub = domain.startsWith('.') ? 'TRUE' : 'FALSE'
+      const expires = c.expirationDate ? Math.floor(c.expirationDate) : 0
+      lines.push([domain, sub, c.path || '/', c.secure ? 'TRUE' : 'FALSE', expires, c.name, c.value || ''].join('\t'))
+    }
+    const p = path.join(os.tmpdir(), 'nsl_cookies.txt')
+    fs.writeFileSync(p, lines.join('\n'))
+    return p
+  } catch { return null }
+}
 
 // ---------------------------------------------------------------------------
 // Filename helpers

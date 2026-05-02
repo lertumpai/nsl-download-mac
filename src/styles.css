@@ -572,7 +572,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.player-close-btn {
+.player-close-btn, .player-mini-btn {
   background: none;
   border: none;
   color: rgba(255,255,255,.7);
@@ -580,8 +580,26 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 4px;
+  flex-shrink: 0;
 }
-.player-close-btn:hover { background: rgba(255,255,255,.15); color: #fff; }
+.player-close-btn:hover, .player-mini-btn:hover { background: rgba(255,255,255,.15); color: #fff; }
+
+/* ── Mini player ─────────────────────────────────────────────────── */
+.player-panel.mini {
+  border-radius: 12px;
+  overflow: hidden;
+  z-index: 200;
+  box-shadow: 0 8px 40px rgba(0,0,0,.7);
+  cursor: move;
+}
+.player-panel.mini .player-controls { display: none; }
+.player-panel.mini .player-title-text { display: none; }
+.player-panel.mini .player-topbar { padding: 4px 6px; background: rgba(0,0,0,.55); }
+.player-panel.mini #btn-player-mini { font-size: 13px; }
+.player-panel.mini #btn-player-mini::before { content: '↗'; }
+.player-panel.mini #btn-player-mini { font-size: 0; } /* hide the ⊟ glyph */
+.player-panel.mini #btn-player-mini::before { font-size: 14px; } /* show ↗ instead */
+.player-panel.mini .player-video-area { cursor: pointer; }
 
 .player-video-area {
   flex: 1;

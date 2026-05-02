@@ -137,6 +137,18 @@ function bindIPCListeners() {
     }
   })
 
+  window.api.on('video:auto-pick', ({ pageURL, pageTitle }) => {
+    upsertDetectedVideo(pageURL, pageTitle, ['Video'])
+    switchTab('detected')
+    // Give the DOM a tick to render the card before opening the picker
+    setTimeout(() => {
+      const card = document.querySelector(`[data-page-url="${CSS.escape(pageURL)}"]`)
+      if (card && !card.querySelector('.quality-picker')) {
+        toggleQualityPicker(card, pageURL, pageTitle)
+      }
+    }, 80)
+  })
+
   window.api.on('playlist:detected', ({ url, listId }) => {
     upsertPlaylistCard(url, listId)
     if (!document.querySelector('.tab-btn[data-tab="detected"]').classList.contains('active')) {
@@ -1000,15 +1012,44 @@ function openPlayer(filePath, title) {
 
 function closePlayer() {
   playerActive = false
+  const panel = $('player-panel')
   const video = $('player-video')
   video.pause()
   video.src = ''
   $('player-thumb-video').src = ''
-  $('player-panel').style.display = 'none'
+  panel.classList.remove('mini')
+  panel.style.cssText = 'display:none'
+  // Always restore browser view (hidePlayer is safe even if already visible)
   window.api.hidePlayer()
 }
 
+function enterMiniPlayer() {
+  const panel = $('player-panel')
+  const miniW = 300, miniH = 190
+  // Place in bottom-left of browser area
+  const left = 20
+  const top = window.innerHeight - miniH - 20
+  panel.style.left   = left + 'px'
+  panel.style.top    = top  + 'px'
+  panel.style.right  = 'auto'
+  panel.style.bottom = 'auto'
+  panel.style.width  = miniW + 'px'
+  panel.style.height = miniH + 'px'
+  panel.classList.add('mini')
+  window.api.hidePlayer()  // restore BrowserView so user can browse
+}
+
+function exitMiniPlayer() {
+  const panel = $('player-panel')
+  panel.classList.remove('mini')
+  // Clear inline overrides — CSS will restore full-screen positioning
+  panel.style.left = panel.style.top = panel.style.right = panel.style.bottom = ''
+  panel.style.width = panel.style.height = ''
+  window.api.showPlayer()  // hide BrowserView behind the full-screen player
+}
+
 function bindPlayerEvents() {
+  const panel      = $('player-panel')
   const video      = $('player-video')
   const thumbVideo = $('player-thumb-video')
   const track      = $('player-progress-track')
@@ -1020,6 +1061,36 @@ function bindPlayerEvents() {
   const thumbTimeEl  = $('player-thumb-time')
 
   $('btn-player-close').addEventListener('click', closePlayer)
+
+  // Mini player toggle
+  $('btn-player-mini').addEventListener('click', () => {
+    if (panel.classList.contains('mini')) exitMiniPlayer()
+    else enterMiniPlayer()
+  })
+
+  // Click video in mini mode → expand to full player
+  video.addEventListener('click', () => {
+    if (panel.classList.contains('mini')) exitMiniPlayer()
+  })
+
+  // Drag mini player
+  let drag = null
+  panel.addEventListener('mousedown', e => {
+    if (!panel.classList.contains('mini')) return
+    if (e.target.closest('button')) return
+    drag = {
+      startX: e.clientX, startY: e.clientY,
+      origLeft: parseInt(panel.style.left) || 0,
+      origTop:  parseInt(panel.style.top)  || 0
+    }
+    e.preventDefault()
+  })
+  document.addEventListener('mousemove', e => {
+    if (!drag) return
+    panel.style.left = (drag.origLeft + e.clientX - drag.startX) + 'px'
+    panel.style.top  = (drag.origTop  + e.clientY - drag.startY) + 'px'
+  })
+  document.addEventListener('mouseup', () => { drag = null })
 
   playBtn.addEventListener('click', () => {
     if (video.paused) video.play(); else video.pause()

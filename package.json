@@ -40,6 +40,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "preload-browser.js",
       "src/**/*",
       "!bin/**/*"
     ]
