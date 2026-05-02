@@ -276,7 +276,7 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
     formats = buildDisplayFormats(meta.formats || [])
     if (!formats.length) throw new Error('No downloadable formats found')
 
-    const title = meta.title || pageTitle
+    const title = meta.title || pageTitle || `playlist_${Date.now()}`
 
     // Find default selection
     const defQuality = settings.defaultQuality || '1080p'
@@ -300,6 +300,10 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
       <button title="Close">✕</button>
     </div>
     <div class="format-list"></div>
+    <div class="filename-edit-row">
+      <input class="filename-edit-input" type="text" id="custom-title"
+             value="${esc(title)}" placeholder="Filename…" spellcheck="false">
+    </div>
     <div class="quality-picker-footer">
       <select class="format-select" id="out-format">
         <option value="mp4" ${defFormat==='mp4'?'selected':''}>MP4</option>
@@ -344,18 +348,20 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
   picker.querySelector('#btn-start-dl').addEventListener('click', async () => {
     const fmt = formats[selectedIdx]
     const outFmt = picker.querySelector('#out-format').value
+    const customTitle = picker.querySelector('#custom-title').value.trim() || title
     const selector = buildFormatSelector(fmt)
     picker.remove()
     activeQualityPicker = null
-    await startDownload({ pageURL, title, formatSelector: selector, outputFormat: outFmt })
+    await startDownload({ pageURL, title: customTitle, formatSelector: selector, outputFormat: outFmt, customTitle })
     switchTab('queue')
   })
 
   picker.querySelector('#btn-extract-audio').addEventListener('click', async () => {
     const audioFmt = picker.querySelector('#out-audio-format').value
+    const customTitle = picker.querySelector('#custom-title').value.trim() || title
     picker.remove()
     activeQualityPicker = null
-    await extractAudioFromPage({ pageURL, title, audioFormat: audioFmt })
+    await extractAudioFromPage({ pageURL, title: customTitle, audioFormat: audioFmt, customTitle })
     switchTab('queue')
   })
 }
@@ -363,6 +369,7 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
 function renderDirectStreamPicker(picker, pageURL, pageTitle) {
   const defFormat = settings.defaultFormat || 'mp4'
   const defAudioFormat = settings.defaultAudioFormat || 'mp3'
+  const displayTitle = pageTitle || `playlist_${Date.now()}`
 
   picker.innerHTML = `
     <div class="quality-picker-header">
@@ -371,6 +378,10 @@ function renderDirectStreamPicker(picker, pageURL, pageTitle) {
     </div>
     <div class="quality-direct-note">
       Stream detected — downloading at best available quality.
+    </div>
+    <div class="filename-edit-row">
+      <input class="filename-edit-input" type="text" id="custom-title"
+             value="${esc(displayTitle)}" placeholder="Filename…" spellcheck="false">
     </div>
     <div class="quality-picker-footer">
       <select class="format-select" id="out-format">
@@ -395,22 +406,24 @@ function renderDirectStreamPicker(picker, pageURL, pageTitle) {
   })
   picker.querySelector('#btn-start-dl').addEventListener('click', async () => {
     const outFmt = picker.querySelector('#out-format').value
+    const customTitle = picker.querySelector('#custom-title').value.trim() || displayTitle
     picker.remove(); activeQualityPicker = null
-    await startDownload({ pageURL, title: pageTitle, formatSelector: 'bestvideo+bestaudio/best', outputFormat: outFmt })
+    await startDownload({ pageURL, title: customTitle, formatSelector: 'bestvideo+bestaudio/best', outputFormat: outFmt, customTitle })
     switchTab('queue')
   })
   picker.querySelector('#btn-extract-audio').addEventListener('click', async () => {
     const audioFmt = picker.querySelector('#out-audio-format').value
+    const customTitle = picker.querySelector('#custom-title').value.trim() || displayTitle
     picker.remove(); activeQualityPicker = null
-    await extractAudioFromPage({ pageURL, title: pageTitle, audioFormat: audioFmt })
+    await extractAudioFromPage({ pageURL, title: customTitle, audioFormat: audioFmt, customTitle })
     switchTab('queue')
   })
 }
 
 // ── Audio extraction ──────────────────────────────────────────────
-async function extractAudioFromPage({ pageURL, title, audioFormat, filePrefix }) {
+async function extractAudioFromPage({ pageURL, title, audioFormat, filePrefix, customTitle }) {
   const id = await window.api.extractAudio({
-    pageURL, audioFormat: audioFormat || settings.defaultAudioFormat || 'mp3', title, filePrefix
+    pageURL, audioFormat: audioFormat || settings.defaultAudioFormat || 'mp3', title, filePrefix, customTitle
   })
   downloads.set(id, {
     id, pageURL, title,
@@ -744,6 +757,17 @@ function bindSettingsForm() {
   $('btn-choose-folder')?.addEventListener('click', async () => {
     const folder = await window.api.chooseFolder()
     if (folder) { settings.saveFolder = folder; setVal('s-folder', folder) }
+  })
+
+  $('btn-clear-cache')?.addEventListener('click', async () => {
+    if (confirm('Clear browser cache? This will remove cached images, scripts, and other data.')) {
+      try {
+        await window.api.clearCache()
+        alert('Cache cleared successfully.')
+      } catch (err) {
+        alert('Failed to clear cache: ' + err.message)
+      }
+    }
   })
 }
 

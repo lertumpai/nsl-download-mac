@@ -31,10 +31,6 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: ()       => ipcRenderer.invoke('settings:get'),
   setSetting:  (k, v)   => ipcRenderer.send('settings:set', k, v),
 
-  // Event listeners (return cleanup fn)
-  on: (channel, cb) => {
-    const wrapped = (_, ...args) => cb(...args)
-    ipcRenderer.on(channel, wrapped)
-    return () => ipcRenderer.removeListener(channel, wrapped)
-  }
-})
+  // Clear cache
+  clearCache: () => ipcRenderer.invoke('clear-cache'),
+

@@ -501,7 +501,7 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
 // ---------------------------------------------------------------------------
 // IPC — audio extraction
 // ---------------------------------------------------------------------------
-ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, filePrefix }) => {
+ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, filePrefix, customTitle }) => {
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
@@ -510,6 +510,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   fs.mkdirSync(saveFolder, { recursive: true })
   let template = '%(title)s.%(ext)s'
   if (filePrefix) template = `${filePrefix} - ${template}`
+  template = applyCustomTitle(template, customTitle)
   const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
@@ -631,12 +632,13 @@ ipcMain.handle('playlist:fetch', async (_, playlistURL) => {
 // ---------------------------------------------------------------------------
 // IPC — download management
 // ---------------------------------------------------------------------------
-ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix }) => {
+ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix, customTitle }) => {
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
   let template = settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s'
   if (filePrefix) template = `${filePrefix} - ${template}`
+  template = applyCustomTitle(template, customTitle)
   const mergeFormat = settings.defaultFormat || 'mp4'
 
   fs.mkdirSync(saveFolder, { recursive: true })
@@ -755,6 +757,29 @@ ipcMain.handle('settings:get', () => store.store || {
   audioQuality: store.get('audioQuality')
 })
 ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
+
+// ---------------------------------------------------------------------------
+// IPC — clear cache
+// ---------------------------------------------------------------------------
+ipcMain.handle('clear-cache', async () => {
+  const browserSession = session.fromPartition('persist:browser')
+  await browserSession.clearCache()
+  return true
+})
+
+
+// ---------------------------------------------------------------------------
+// Filename helpers
+// ---------------------------------------------------------------------------
+function sanitizeFilename(name) {
+  return String(name || '').replace(/[/\\:*?"<>|]/g, '_').trim() || 'video'
+}
+
+function applyCustomTitle(template, customTitle) {
+  if (!customTitle) return template
+  const safe = sanitizeFilename(customTitle)
+  return template.replace('%(title)s', safe || `playlist_${Date.now()}`)
+}
 
 // ---------------------------------------------------------------------------
 // Progress line parser
