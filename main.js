@@ -251,8 +251,7 @@ function setupVideoInterception() {
     const pageURL = requestingView.webContents.getURL()
     const pageTitle = requestingView.webContents.getTitle()
     
-    // Only send IPC if this is the active tab
-    recordDetection(pageURL, pageTitle, type, requestingTabId === activeTabId)
+    recordDetection(pageURL, pageTitle, type, url)
   })
 }
 
@@ -270,11 +269,14 @@ function classifyRequest(url, contentType) {
   return null
 }
 
-function recordDetection(pageURL, pageTitle, type) {
+function recordDetection(pageURL, pageTitle, type, streamUrl = null) {
   if (!pageURL || pageURL === 'about:blank' || pageURL.startsWith('devtools://')) return
 
   const existing = detectedByPage.get(pageURL)
   if (existing) {
+    if (streamUrl && !existing.streamUrl && (type === 'HLS' || type === 'DASH' || type === 'Video')) {
+      existing.streamUrl = streamUrl
+    }
     if (existing.types.has(type)) return // already know this type for this page
     existing.types.add(type)
   } else {
@@ -282,7 +284,8 @@ function recordDetection(pageURL, pageTitle, type) {
       pageURL, pageTitle,
       favicon: null,
       types: new Set([type]),
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      streamUrl: streamUrl || null
     })
   }
 
@@ -308,7 +311,7 @@ async function scanDOMForVideos() {
     const pageTitle = view.webContents.getTitle()
     for (const src of found) {
       const type = classifyRequest(src, '')
-      recordDetection(pageURL, pageTitle, type || 'Video')
+      recordDetection(pageURL, pageTitle, type || 'Video', src)
     }
   } catch { /* cross-origin or CSP blocked */ }
 }
@@ -375,7 +378,14 @@ ipcMain.on('tab:close', (_, tabId) => {
 ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
   return new Promise((resolve, reject) => {
     const bin = findBinary('yt-dlp')
-    const proc = spawn(bin, ['--dump-json', '--no-playlist', pageURL])
+    const pageData = detectedByPage.get(pageURL)
+    const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+
+    const args = ['--dump-json', '--no-playlist']
+    if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+    args.push(targetUrl)
+
+    const proc = spawn(bin, args)
     let out = '', err = ''
     proc.stdout.on('data', d => { out += d })
     proc.stderr.on('data', d => { err += d })
@@ -406,6 +416,9 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   if (filePrefix) template = `${filePrefix} - ${template}`
   const outputTemplate = path.join(saveFolder, template)
 
+  const pageData = detectedByPage.get(pageURL)
+  const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+
   const bin = findBinary('yt-dlp')
   const args = [
     '-f', 'bestaudio',
@@ -414,9 +427,10 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
     '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
     '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
     '--output', outputTemplate,
-    '--newline',
-    pageURL
+    '--newline'
   ]
+  if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+  args.push(targetUrl)
 
   const proc = spawn(bin, args)
   activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
@@ -514,15 +528,19 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   fs.mkdirSync(saveFolder, { recursive: true })
   const outputTemplate = path.join(saveFolder, template)
 
+  const pageData = detectedByPage.get(pageURL)
+  const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+
   const bin = findBinary('yt-dlp')
   const args = [
     '--format', formatSelector,
     '--merge-output-format', mergeFormat,
     '--output', outputTemplate,
     '--newline', '--no-playlist', '--progress',
-    '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
-    pageURL
+    '--ffmpeg-location', path.dirname(findBinary('ffmpeg'))
   ]
+  if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+  args.push(targetUrl)
 
   const proc = spawn(bin, args)
   activeDownloads.set(id, { proc, pageURL, title })
