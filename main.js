@@ -481,12 +481,18 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     proc.stderr.on('data', d => { err += d })
     proc.on('close', code => {
       const line = out.split('\n').find(l => l.trim().startsWith('{'))
-      if (!line) {
-        reject(new Error(err.trim() || `yt-dlp exited ${code}`))
+      if (line) {
+        try { resolve(JSON.parse(line)); return }
+        catch {}
+      }
+      // yt-dlp couldn't analyse the URL — fall back to direct-stream mode if we
+      // have an intercepted raw stream URL (m3u8 / mpd / mp4 etc.)
+      const streamUrl = pageData?.streamUrl
+      if (code !== 0 && streamUrl && /\.(m3u8|mpd|mp4|webm|mkv|mov)(\?|$)/i.test(streamUrl)) {
+        resolve({ title: pageData?.pageTitle || 'Video', _direct: true, formats: [] })
         return
       }
-      try { resolve(JSON.parse(line)) }
-      catch (e) { reject(new Error('Failed to parse yt-dlp JSON')) }
+      reject(new Error(err.trim() || `yt-dlp exited ${code}`))
     })
     proc.on('error', reject)
   })
@@ -522,6 +528,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   ]
   if (targetUrl !== pageURL) {
     args.push('--add-header', `Referer: ${pageURL}`)
+    try { args.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
   }
   args.push(targetUrl)
 
@@ -635,6 +642,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   ]
   if (targetUrl !== pageURL) {
     args.push('--add-header', `Referer: ${pageURL}`)
+    try { args.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
   }
   args.push(targetUrl)
 
