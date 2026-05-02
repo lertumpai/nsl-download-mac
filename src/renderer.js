@@ -6,6 +6,9 @@ const completed     = []
 let settings = {}
 let activeQualityPicker = null   // pageURL currently showing quality picker
 
+// Player state
+let playerActive = false
+
 // Playlist state
 let currentPlaylist = null        // { url, listId, title, entries[] }
 let playlistView    = false       // true = showing playlist panel
@@ -76,6 +79,9 @@ function bindEvents() {
 
   // Settings form
   bindSettingsForm()
+
+  // Video player
+  bindPlayerEvents()
 }
 
 function bindIPCListeners() {
@@ -703,14 +709,20 @@ function renderCompleted() {
     const item = document.createElement('div')
     item.className = 'completed-item'
     item.dataset.doneId = newest.id
+    const canPlay = !newest.isAudio && newest.filePath
     item.innerHTML = `
       <span class="completed-icon">${newest.isAudio ? '♪' : '✅'}</span>
       <span class="completed-title" title="${esc(newest.title)}">${esc(newest.title)}</span>
       <div class="completed-actions">
+        ${canPlay ? `<button class="link-btn" data-action="play">▶ Play</button>` : ''}
         <button class="link-btn" data-action="open">Open</button>
         <button class="link-btn" data-action="finder">Finder</button>
       </div>
     `
+    if (canPlay) {
+      item.querySelector('[data-action="play"]').addEventListener('click', () =>
+        openPlayer(newest.filePath, newest.title))
+    }
     item.querySelector('[data-action="open"]').addEventListener('click', () =>
       window.api.openFile(newest.filePath || ''))
     item.querySelector('[data-action="finder"]').addEventListener('click', () =>
@@ -897,6 +909,115 @@ function buildFormatSelector(fmt) {
   const h = fmt.height || 0
   if (h) return `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`
   return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+}
+
+// ── Video Player ──────────────────────────────────────────────────
+function pathToFileUrl(filePath) {
+  return 'file://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/')
+}
+
+function fmtTime(secs) {
+  const s = Math.floor(secs || 0)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+  return `${m}:${String(sec).padStart(2,'0')}`
+}
+
+function openPlayer(filePath, title) {
+  playerActive = true
+  const video = $('player-video')
+  const thumbVideo = $('player-thumb-video')
+  $('player-title').textContent = title || ''
+  video.src = pathToFileUrl(filePath)
+  thumbVideo.src = pathToFileUrl(filePath)
+  video.play()
+  $('player-panel').style.display = 'flex'
+  window.api.showPlayer()
+}
+
+function closePlayer() {
+  playerActive = false
+  const video = $('player-video')
+  video.pause()
+  video.src = ''
+  $('player-thumb-video').src = ''
+  $('player-panel').style.display = 'none'
+  window.api.hidePlayer()
+}
+
+function bindPlayerEvents() {
+  const video      = $('player-video')
+  const thumbVideo = $('player-thumb-video')
+  const track      = $('player-progress-track')
+  const fill       = $('player-progress-fill')
+  const timeEl     = $('player-time')
+  const playBtn    = $('btn-player-play')
+  const thumbPreview = $('player-thumb-preview')
+  const thumbCanvas  = $('player-thumb-canvas')
+  const thumbTimeEl  = $('player-thumb-time')
+
+  $('btn-player-close').addEventListener('click', closePlayer)
+
+  playBtn.addEventListener('click', () => {
+    if (video.paused) video.play(); else video.pause()
+  })
+
+  video.addEventListener('play',  () => { playBtn.textContent = '⏸' })
+  video.addEventListener('pause', () => { playBtn.textContent = '▶' })
+  video.addEventListener('ended', () => { playBtn.textContent = '▶' })
+
+  video.addEventListener('timeupdate', () => {
+    if (!video.duration) return
+    const pct = video.currentTime / video.duration * 100
+    fill.style.width = pct + '%'
+    timeEl.textContent = fmtTime(video.currentTime) + ' / ' + fmtTime(video.duration)
+  })
+
+  // Click to seek
+  track.addEventListener('click', e => {
+    if (!video.duration) return
+    const rect = track.getBoundingClientRect()
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    video.currentTime = pct * video.duration
+  })
+
+  // Thumbnail preview on hover
+  let thumbTimer = null
+  track.addEventListener('mousemove', e => {
+    if (!video.duration) return
+    const rect = track.getBoundingClientRect()
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    const seekTime = pct * video.duration
+    const canvasHalf = 80
+    const clampedX = Math.max(canvasHalf, Math.min(rect.width - canvasHalf, e.clientX - rect.left))
+    thumbPreview.style.left = clampedX + 'px'
+    thumbPreview.style.display = 'block'
+    thumbTimeEl.textContent = fmtTime(seekTime)
+    clearTimeout(thumbTimer)
+    thumbTimer = setTimeout(() => { thumbVideo.currentTime = seekTime }, 60)
+  })
+
+  track.addEventListener('mouseleave', () => {
+    thumbPreview.style.display = 'none'
+    clearTimeout(thumbTimer)
+  })
+
+  thumbVideo.addEventListener('seeked', () => {
+    const ctx = thumbCanvas.getContext('2d')
+    ctx.drawImage(thumbVideo, 0, 0, 160, 90)
+  })
+
+  // Keyboard shortcuts (only when player is open)
+  document.addEventListener('keydown', e => {
+    if (!playerActive) return
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
+    if (e.key === 'ArrowLeft')  { video.currentTime = Math.max(0, video.currentTime - 10); e.preventDefault() }
+    if (e.key === 'ArrowRight') { video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); e.preventDefault() }
+    if (e.key === ' ')          { video.paused ? video.play() : video.pause(); e.preventDefault() }
+    if (e.key === 'Escape')     { closePlayer(); e.preventDefault() }
+  })
 }
 
 // ── Utils ─────────────────────────────────────────────────────────

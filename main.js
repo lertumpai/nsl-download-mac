@@ -66,6 +66,7 @@ const detectedByPage = new Map()
 const activeDownloads = new Map()
 
 let downloadIdCounter = 0
+let playerVisible = false
 
 // ---------------------------------------------------------------------------
 // yt-dlp / ffmpeg binary resolution
@@ -253,6 +254,7 @@ function getActiveView() {
 }
 
 function repositionBrowserView() {
+  if (playerVisible) return
   if (!mainWindow || !activeTabId) return
   const view = browserTabs.get(activeTabId)
   if (!view) return
@@ -757,6 +759,22 @@ ipcMain.handle('settings:get', () => store.store || {
   audioQuality: store.get('audioQuality')
 })
 ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
+
+// ---------------------------------------------------------------------------
+// IPC — video player
+// ---------------------------------------------------------------------------
+ipcMain.on('player:show', () => {
+  playerVisible = true
+  if (activeTabId) {
+    const view = browserTabs.get(activeTabId)
+    if (view) view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  }
+})
+
+ipcMain.on('player:hide', () => {
+  playerVisible = false
+  repositionBrowserView()
+})
 
 // ---------------------------------------------------------------------------
 // IPC — clear cache

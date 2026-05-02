@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: ()       => ipcRenderer.invoke('settings:get'),
   setSetting:  (k, v)   => ipcRenderer.send('settings:set', k, v),
 
+  // Video player
+  showPlayer: () => ipcRenderer.send('player:show'),
+  hidePlayer: () => ipcRenderer.send('player:hide'),
+
   // Clear cache
   clearCache: () => ipcRenderer.invoke('clear-cache'),
 

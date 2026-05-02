@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;">
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; media-src 'self' file:;">
   <title>NSL Downloader</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -150,6 +150,33 @@
 
   </div><!-- /sidebar -->
 </div><!-- /main -->
+
+<!-- ── Video Player Panel ────────────────────────────────────────── -->
+<div id="player-panel" class="player-panel" style="display:none">
+  <div class="player-topbar">
+    <span id="player-title" class="player-title-text"></span>
+    <button id="btn-player-close" class="player-close-btn" title="Close (Esc)">✕</button>
+  </div>
+  <div class="player-video-area">
+    <video id="player-video" preload="auto"></video>
+  </div>
+  <div class="player-controls">
+    <div class="player-progress-wrap">
+      <div id="player-thumb-preview" class="player-thumb-preview" style="display:none">
+        <canvas id="player-thumb-canvas" width="160" height="90"></canvas>
+        <span id="player-thumb-time" class="player-thumb-time"></span>
+      </div>
+      <div id="player-progress-track" class="player-progress-track">
+        <div id="player-progress-fill" class="player-progress-fill"></div>
+      </div>
+    </div>
+    <div class="player-bottom-bar">
+      <button id="btn-player-play" class="player-play-btn" title="Play/Pause (Space)">▶</button>
+      <span id="player-time" class="player-time-display">0:00 / 0:00</span>
+    </div>
+  </div>
+  <video id="player-thumb-video" muted preload="auto" style="display:none"></video>
+</div>
 
 <script src="renderer.js"></script>
 </body>
