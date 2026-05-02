@@ -59,6 +59,21 @@ function bindEvents() {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab))
   })
 
+  // Download queue — single delegated listener so buttons survive innerHTML re-renders
+  $('queue-list').addEventListener('click', e => {
+    const btn = e.target.closest('[data-action]')
+    if (!btn) return
+    const item = btn.closest('[data-dl-id]')
+    if (!item) return
+    const id = item.dataset.dlId
+    const dl = downloads.get(id)
+    const a = btn.dataset.action
+    if (a === 'pause'  && dl) { dl.status = 'paused';       window.api.pauseDownload(id);  renderDownloadItem(id) }
+    if (a === 'resume' && dl) { dl.status = 'downloading';  window.api.resumeDownload(id); renderDownloadItem(id) }
+    if (a === 'cancel')       { downloads.delete(id); window.api.cancelDownload(id); item.remove(); updateQueueEmpty() }
+    if (a === 'retry'  && dl) { startRetry(dl) }
+  })
+
   // Settings form
   bindSettingsForm()
 }
@@ -276,7 +291,7 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
     formats = buildDisplayFormats(meta.formats || [])
     if (!formats.length) throw new Error('No downloadable formats found')
 
-    const title = meta.title || pageTitle || `playlist_${Date.now()}`
+    const title = pageTitle || meta.title || `playlist_${Date.now()}`
 
     // Find default selection
     const defQuality = settings.defaultQuality || '1080p'
@@ -617,9 +632,9 @@ function formatDuration(secs) {
 }
 
 // ── Download management ───────────────────────────────────────────
-async function startDownload({ pageURL, title, formatSelector, outputFormat, filePrefix }) {
+async function startDownload({ pageURL, title, formatSelector, outputFormat, filePrefix, customTitle }) {
   const id = await window.api.startDownload({
-    pageURL, formatSelector, title, filePrefix,
+    pageURL, formatSelector, title, filePrefix, customTitle,
     outputFormat: outputFormat || settings.defaultFormat || 'mp4'
   })
 
@@ -671,15 +686,6 @@ function renderDownloadItem(id) {
     </div>
   `
 
-  item.querySelectorAll('[data-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const a = btn.dataset.action
-      if (a === 'pause')  { dl.status = 'paused';  window.api.pauseDownload(id);  renderDownloadItem(id) }
-      if (a === 'resume') { dl.status = 'downloading'; window.api.resumeDownload(id); renderDownloadItem(id) }
-      if (a === 'cancel') { downloads.delete(id);  window.api.cancelDownload(id); item.remove(); updateQueueEmpty() }
-      if (a === 'retry')  { startRetry(dl) }
-    })
-  })
 }
 
 function renderQueued() {
