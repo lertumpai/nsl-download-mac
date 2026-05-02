@@ -278,7 +278,7 @@ function setupVideoInterception() {
     let requestingTabId = null
     let requestingView = null
     for (const [tId, view] of browserTabs.entries()) {
-      if (view.webContents.id === details.webContentsId) {
+      if (view.webContents && view.webContents.id === details.webContentsId) {
         requestingTabId = tId
         requestingView = view
         break
@@ -292,6 +292,8 @@ function setupVideoInterception() {
 
     const type = classifyRequest(url, contentType)
     if (!type) return
+
+    if (!requestingView.webContents) return
 
     const pageURL = requestingView.webContents.getURL()
     const pageTitle = requestingView.webContents.getTitle()
