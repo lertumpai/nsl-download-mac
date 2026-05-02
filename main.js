@@ -167,115 +167,91 @@ function createWindow() {
 // ---------------------------------------------------------------------------
 // Video overlay injection script — hover a <video> element to see the button
 // ---------------------------------------------------------------------------
-// Extract the best downloadable URL from any player framework on the page.
-// Priority: JW Player → Video.js → common config objects → video element src (skip blob:)
+// Runs once per page via executeJavaScript — sets up hover buttons for all player types.
 const VIDEO_OVERLAY_SCRIPT = `;(function(){
   if(window.__nslInjected)return;window.__nslInjected=true;
 
-  /* ── URL extractors ── */
-  function jwUrl(){
-    try{
-      var jw=window.jwplayer&&window.jwplayer();
-      if(!jw||!jw.getPlaylistItem)return null;
-      var item=jw.getPlaylistItem();
-      if(!item)return null;
-      var srcs=item.allSources||item.sources||[];
-      var best=srcs.find(function(x){return x.file&&/\\.m3u8/i.test(x.file)})
-              ||srcs.find(function(x){return x.file&&/\\.mp4/i.test(x.file)})
-              ||srcs.find(function(x){return x.file&&x.file.startsWith('http');});
-      return(best&&best.file)||item.file||null;
-    }catch(e){return null;}
-  }
-  function vjsUrl(){
-    try{
-      if(!window.videojs||!window.videojs.players)return null;
-      var p=Object.values(window.videojs.players).find(function(x){return x;});
-      var s=p&&p.currentSrc&&p.currentSrc();
-      return(s&&s.startsWith('http'))?s:null;
-    }catch(e){return null;}
-  }
-  function cfgUrl(){
-    var keys=['playerConfig','_playerConfig','p2pConfig','__streamConfig','streamConfig','videoConfig','nplayer_config','playerVars'];
-    for(var i=0;i<keys.length;i++){
-      try{
-        var c=window[keys[i]];if(!c)continue;
-        var u=c.url||c.src||c.hls||c.stream||c.source||c.videoUrl||c.video_url||c.hlsUrl;
-        if(u&&typeof u==='string'&&u.startsWith('http'))return u;
-      }catch(e){}
-    }
-    return null;
-  }
-  function bestUrl(video){
-    return jwUrl()||vjsUrl()||cfgUrl()||(function(){
-      var s=video?(video.currentSrc||video.src||''):'';
-      return(s&&s.startsWith('http'))?s:null;
-    })();
+  /* ── shared helpers ── */
+  var BTN_CSS='position:fixed;z-index:2147483647;background:rgba(0,0,0,.85);color:#fff;border:none;border-radius:18px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;display:none;pointer-events:auto;box-shadow:0 2px 14px rgba(0,0,0,.55);';
+  function mkBtn(label){var b=document.createElement('button');b.textContent=label;b.style.cssText=BTN_CSS;(document.body||document.documentElement).appendChild(b);return b;}
+  function posAt(b,el,e){var r=el.getBoundingClientRect();b.style.top=Math.max(8,r.top+10)+'px';b.style.right=Math.max(8,window.innerWidth-r.right+10)+'px';}
+  function hover(el,b,getUrl){
+    var t=null;
+    el.addEventListener('mouseenter',function(){clearTimeout(t);posAt(b,el);b.style.display='block';});
+    el.addEventListener('mouseleave',function(e){if(e.relatedTarget!==b)t=setTimeout(function(){b.style.display='none';},220);});
+    b.addEventListener('mouseenter',function(){clearTimeout(t);});
+    b.addEventListener('mouseleave',function(){t=setTimeout(function(){b.style.display='none';},220);});
+    b.addEventListener('click',function(e){e.stopPropagation();var u=getUrl();if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);b.style.display='none';});
   }
 
-  /* ── Floating button on <video> hover ── */
-  var btn=document.createElement('button');
-  btn.textContent='\\u2b07 Download Video';
-  btn.style.cssText='position:fixed;z-index:2147483647;background:rgba(0,0,0,.85);color:#fff;border:none;border-radius:20px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;display:none;pointer-events:auto;box-shadow:0 2px 16px rgba(0,0,0,.6);';
-  (document.body||document.documentElement).appendChild(btn);
-  var cur=null,timer=null;
-  function show(v){
-    clearTimeout(timer);cur=v;
-    var r=v.getBoundingClientRect();
-    if(r.width<80||r.height<50)return;
-    btn.style.top=Math.max(8,r.top+8)+'px';
-    btn.style.right=Math.max(8,window.innerWidth-r.right+8)+'px';
-    btn.style.display='block';
-  }
-  function hide(){timer=setTimeout(function(){btn.style.display='none';cur=null;},250);}
-  function attach(v){
+  /* ── URL extractors (bypass blob: by reading player API) ── */
+  function jwUrl(){try{var jw=window.jwplayer&&window.jwplayer();if(!jw||!jw.getPlaylistItem)return null;var item=jw.getPlaylistItem();if(!item)return null;var srcs=item.allSources||item.sources||[];var best=srcs.find(function(x){return x.file&&/\\.m3u8/i.test(x.file);})||srcs.find(function(x){return x.file&&x.file.startsWith('http');});return(best&&best.file)||item.file||null;}catch(e){return null;}}
+  function artUrl(){try{if(!window.Artplayer||!window.Artplayer.instances||!window.Artplayer.instances.length)return null;var a=window.Artplayer.instances[0];return(a.url)||(a.option&&a.option.url)||null;}catch(e){return null;}}
+  function vjsUrl(){try{if(!window.videojs||!window.videojs.players)return null;var p=Object.values(window.videojs.players).find(function(x){return x;});var s=p&&p.currentSrc&&p.currentSrc();return(s&&s.startsWith('http'))?s:null;}catch(e){return null;}}
+  function vidElUrl(v){var s=v?(v.currentSrc||v.src||''):'';return(s&&!s.startsWith('blob:')&&s.startsWith('http'))?s:null;}
+
+  /* ── <video> element hover button ── */
+  var vBtn=mkBtn('\\u2b07 Download Video');
+  var cur=null;
+  function attachVideo(v){
     if(v.__nslDone)return;v.__nslDone=true;
-    v.addEventListener('mouseenter',function(){show(v);});
-    v.addEventListener('mouseleave',hide);
+    hover(v,vBtn,function(){return jwUrl()||artUrl()||vjsUrl()||vidElUrl(cur);});
+    v.addEventListener('mouseenter',function(){cur=v;});
   }
-  btn.addEventListener('mouseenter',function(){clearTimeout(timer);});
-  btn.addEventListener('mouseleave',hide);
-  btn.addEventListener('click',function(e){
-    e.stopPropagation();
-    var u=bestUrl(cur);
-    if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);
-    btn.style.display='none';
-  });
+  document.querySelectorAll('video').forEach(attachVideo);
 
-  /* ── JW Player branded button inside the player container ── */
+  /* ── JW Player fixed-position button (avoids overflow:hidden clipping) ── */
   function injectJWBtn(){
+    try{var jw=window.jwplayer&&window.jwplayer();if(!jw||!jw.getContainer)return;var c=jw.getContainer();if(!c||c.__nslJW)return;c.__nslJW=true;var b=mkBtn('\\u2b07 Download');hover(c,b,jwUrl);}catch(e){}
+  }
+
+  /* ── ArtPlayer — native controls API first, fixed-pos fallback ── */
+  function injectArtBtn(){
     try{
-      var jw=window.jwplayer&&window.jwplayer();
-      if(!jw||!jw.getContainer)return;
-      var c=jw.getContainer();
-      if(!c||c.__nslJW)return;
-      c.__nslJW=true;
-      c.style.position=c.style.position||'relative';
-      var b=document.createElement('button');
-      b.textContent='\\u2b07 Download';
-      b.style.cssText='position:absolute;top:10px;right:10px;z-index:9999;background:rgba(0,0,0,.82);color:#fff;border:none;border-radius:16px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer;opacity:0;transition:opacity .2s;pointer-events:auto;';
-      c.appendChild(b);
-      c.addEventListener('mouseenter',function(){b.style.opacity='1';});
-      c.addEventListener('mouseleave',function(){b.style.opacity='0';});
-      b.addEventListener('click',function(e){
-        e.stopPropagation();
-        var u=jwUrl();
-        if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);
+      if(!window.Artplayer||!window.Artplayer.instances)return;
+      window.Artplayer.instances.forEach(function(art){
+        if(art.__nslDone)return;art.__nslDone=true;
+        try{
+          art.controls.add({name:'nsl-dl',position:'right',html:'<span style="font-size:19px;line-height:1;cursor:pointer;opacity:.9;padding:0 4px" title="Download">\\u2b07</span>',
+            click:function(){var u=artUrl();if(u&&window.__nsl)window.__nsl.requestDownload(u,location.href,document.title);}});
+        }catch(e){
+          var c=art.template&&(art.template.player||art.template.wrap);
+          if(c){var b=mkBtn('\\u2b07 Download');hover(c,b,artUrl);}
+        }
       });
     }catch(e){}
   }
 
-  document.querySelectorAll('video').forEach(attach);
-  setTimeout(injectJWBtn,600);
-  setTimeout(injectJWBtn,2000); // retry for slow-loading JW Player instances
+  /* ── setup ── */
+  setTimeout(injectJWBtn,500);setTimeout(injectJWBtn,2500);
+  setTimeout(injectArtBtn,500);setTimeout(injectArtBtn,2500);
 
   new MutationObserver(function(ms){
     ms.forEach(function(m){m.addedNodes.forEach(function(n){
-      if(n.tagName==='VIDEO')attach(n);
-      else if(n.querySelectorAll)n.querySelectorAll('video').forEach(attach);
+      if(n.tagName==='VIDEO')attachVideo(n);
+      else if(n.querySelectorAll)n.querySelectorAll('video').forEach(attachVideo);
     });});
-    injectJWBtn();
+    injectJWBtn();injectArtBtn();
   }).observe(document.documentElement,{childList:true,subtree:true});
 })();`
+
+// Runs via executeJavaScript multiple times — returns array of video URLs found in any player API.
+// Safe to run repeatedly; never modifies the DOM.
+const PLAYER_DETECT_SCRIPT = `(function(){
+  var urls=[];
+  function add(u){if(u&&typeof u==='string'&&u.startsWith('http')&&!u.startsWith('blob:'))urls.push(u);}
+  // JW Player
+  try{var jw=window.jwplayer&&window.jwplayer();if(jw&&jw.getPlaylist){[jw.getPlaylistItem&&jw.getPlaylistItem()].concat(jw.getPlaylist()||[]).filter(Boolean).forEach(function(item){(item.allSources||item.sources||[]).forEach(function(s){add(s.file);});add(item.file);});}}catch(e){}
+  // ArtPlayer
+  try{if(window.Artplayer&&window.Artplayer.instances)window.Artplayer.instances.forEach(function(a){add(a.url);add(a.option&&a.option.url);});}catch(e){}
+  // Video.js
+  try{if(window.videojs&&window.videojs.players)Object.values(window.videojs.players).forEach(function(p){if(!p)return;add(p.currentSrc&&p.currentSrc());(p.currentSources?p.currentSources():[]).forEach(function(s){add(s.src);});});}catch(e){}
+  // Common p2p/stream config objects
+  ['playerConfig','_playerConfig','p2pConfig','streamConfig','videoConfig','nplayer_config','playerVars','_nativeConfig'].forEach(function(k){try{var c=window[k];if(!c)return;add(c.url||c.src||c.hls||c.stream||c.source||c.videoUrl||c.hlsUrl||c.video_url);}catch(e){}});
+  // Direct <video> src (only if not blob:)
+  document.querySelectorAll('video').forEach(function(v){add(v.currentSrc);add(v.src);});
+  return[...new Set(urls)];
+})()`
 
 function handleVideoDownloadRequest(videoUrl, pageUrl, pageTitle) {
   if (!videoUrl || !pageUrl) return
@@ -305,31 +281,48 @@ function createBrowserTab(url) {
     return { action: 'deny' }
   })
 
-  // Right-click context menu for video elements
+  // Right-click context menu — always show download option; scan player APIs if no direct srcURL
   view.webContents.on('context-menu', (_, params) => {
     const items = []
-    if (params.mediaType === 'video' && params.srcURL) {
-      items.push({
-        label: '↓ Download Video with NSL',
-        click: () => handleVideoDownloadRequest(
-          params.srcURL,
-          view.webContents.getURL(),
-          view.webContents.getTitle()
-        )
-      })
-      items.push({ type: 'separator' })
-    }
-    // Always show standard browser items
+    items.push({
+      label: '↓ Download Video with NSL',
+      click: async () => {
+        let url = (params.mediaType === 'video' && params.srcURL) ? params.srcURL : null
+        if (!url) {
+          try {
+            const found = await view.webContents.executeJavaScript(PLAYER_DETECT_SCRIPT)
+            url = Array.isArray(found) && found[0]
+          } catch {}
+        }
+        if (url) handleVideoDownloadRequest(url, view.webContents.getURL(), view.webContents.getTitle())
+      }
+    })
+    items.push({ type: 'separator' })
     if (params.linkURL) items.push({ label: 'Open Link in New Tab', click: () => mainWindow?.webContents.send('tab:new-requested', params.linkURL) })
     if (params.selectionText) items.push({ label: 'Copy', role: 'copy' })
     items.push({ label: 'Back', click: () => view.webContents.canGoBack() && view.webContents.goBack() })
     items.push({ label: 'Reload', click: () => view.webContents.reload() })
-    if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow })
+    Menu.buildFromTemplate(items).popup({ window: mainWindow })
   })
 
-  // Inject overlay download button after each page finishes loading
+  // Inject overlay download button after each page finishes loading + periodic player API scan
   view.webContents.on('did-stop-loading', () => {
     view.webContents.executeJavaScript(VIDEO_OVERLAY_SCRIPT).catch(() => {})
+    // Players like JW Player / ArtPlayer may init 1-8s after the page loads
+    ;[1000, 3000, 8000].forEach(delay => {
+      setTimeout(async () => {
+        if (view.webContents.isDestroyed()) return
+        try {
+          const found = await view.webContents.executeJavaScript(PLAYER_DETECT_SCRIPT)
+          if (!Array.isArray(found) || !found.length) return
+          const currentUrl = view.webContents.getURL()
+          const currentTitle = view.webContents.getTitle()
+          for (const u of found) {
+            recordDetection(currentUrl, currentTitle, classifyRequest(u, '') || 'Video', u)
+          }
+        } catch {}
+      }, delay)
+    })
   })
 
   // Forward browser events to renderer, tagged with tabId
@@ -550,6 +543,16 @@ async function scanDOMForVideos() {
                 if (item.file && item.file.startsWith('http')) urls.add(item.file)
               })
             }
+          } catch(e) {}
+        }
+
+        // ArtPlayer
+        if (window.Artplayer && window.Artplayer.instances) {
+          try {
+            window.Artplayer.instances.forEach(a => {
+              const u = a.url || (a.option && a.option.url)
+              if (u && typeof u === 'string' && u.startsWith('http')) urls.add(u)
+            })
           } catch(e) {}
         }
 
