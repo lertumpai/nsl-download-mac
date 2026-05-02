@@ -20,7 +20,7 @@ try {
       saveFolder: path.join(os.homedir(), 'Movies', 'NSL Downloads'),
       filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
       maxConcurrentDownloads: 3,
-      homepage: 'https://www.youtube.com',
+      homepage: 'https://www.google.com',
       windowBounds: { width: 1300, height: 820 },
       defaultAudioFormat: 'mp3',
       audioQuality: '320'
@@ -34,7 +34,7 @@ try {
     saveFolder: path.join(os.homedir(), 'Movies', 'NSL Downloads'),
     filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
     maxConcurrentDownloads: 3,
-    homepage: 'https://www.youtube.com',
+    homepage: 'https://www.google.com',
     windowBounds: { width: 1300, height: 820 },
     defaultAudioFormat: 'mp3',
     audioQuality: '320'
@@ -260,11 +260,15 @@ function classifyRequest(url, contentType) {
   if (url.includes('.ts?') || url.match(/\/seg\d+\./)) return null
   if (url.includes('doubleclick') || url.includes('analytics')) return null
 
-  if (url.match(/\.m3u8(\?|$)/i) || contentType.includes('mpegurl')) return 'HLS'
-  if (url.match(/\.mpd(\?|$)/i) || contentType.includes('dash+xml')) return 'DASH'
+  const normType = (contentType || '').toLowerCase()
+
+  if (url.match(/\.m3u8(\?|$)/i) || normType.includes('mpegurl') || normType.includes('application/vnd.apple.mpegurl')) return 'HLS'
+  if (url.match(/\.mpd(\?|$)/i) || normType.includes('dash+xml')) return 'DASH'
   if (url.includes('googlevideo.com') && url.includes('videoplayback')) return 'YouTube'
   if (url.includes('video.twimg.com') && url.includes('.mp4')) return 'Twitter'
-  if (contentType.startsWith('video/') && !url.includes('/seg') && !url.endsWith('.ts')) return 'Video'
+  if (url.match(/\.(mp4|webm|mkv|mov|ogg|ogv)(\?|$)/i)) return 'Video'
+  if (normType.startsWith('video/') && !url.includes('/seg') && !url.endsWith('.ts')) return 'Video'
+  if (normType.includes('application/octet-stream') && url.match(/\.(mp4|webm|mkv|mov|ogg|ogv|m3u8|mpd)(\?|$)/i)) return 'Video'
 
   return null
 }
@@ -302,9 +306,12 @@ async function scanDOMForVideos() {
   try {
     const found = await view.webContents.executeJavaScript(`
       (function() {
-        return Array.from(document.querySelectorAll('video'))
-          .map(v => v.src || v.currentSrc)
-          .filter(s => s && s.startsWith('http'))
+        const urls = new Set()
+        document.querySelectorAll('video, source, iframe, a').forEach(el => {
+          const src = el.src || el.currentSrc || el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('data-src')
+          if (src && src.startsWith('http')) urls.add(src)
+        })
+        return Array.from(urls)
       })()
     `)
     const pageURL = view.webContents.getURL()
@@ -347,7 +354,7 @@ ipcMain.on('browser:go', (_, input) => {
   // Quick fix: assume domain if no protocol and no spaces
   if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('file://')) {
     if (url.includes(' ') || !url.includes('.')) {
-      url = `https://duckduckgo.com/?q=${encodeURIComponent(url)}`
+      url = `https://www.google.com/search?q=${encodeURIComponent(url)}`
     } else {
       url = 'https://' + url
     }
@@ -360,7 +367,8 @@ ipcMain.on('browser:forward', () => getActiveView()?.webContents.canGoForward() 
 ipcMain.on('browser:reload',  () => getActiveView()?.webContents.reload())
 
 ipcMain.handle('tab:create', (_, url) => {
-  const tabId = createBrowserTab(url || store.store?.homepage || 'https://www.youtube.com')
+  const tabId = createBrowserTab(url || store.get('homepage') || 'https://www.google.com')
+  if (!activeTabId) switchBrowserTab(tabId)
   return tabId
 })
 
@@ -381,8 +389,10 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     const pageData = detectedByPage.get(pageURL)
     const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
 
-    const args = ['--dump-json', '--no-playlist']
-    if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+    const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
+    if (targetUrl !== pageURL) {
+      args.push('--add-header', `Referer: ${pageURL}`)
+    }
     args.push(targetUrl)
 
     const proc = spawn(bin, args)
@@ -427,9 +437,12 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
     '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
     '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
     '--output', outputTemplate,
-    '--newline'
+    '--newline',
+    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
   ]
-  if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+  if (targetUrl !== pageURL) {
+    args.push('--add-header', `Referer: ${pageURL}`)
+  }
   args.push(targetUrl)
 
   const proc = spawn(bin, args)
@@ -537,9 +550,12 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     '--merge-output-format', mergeFormat,
     '--output', outputTemplate,
     '--newline', '--no-playlist', '--progress',
-    '--ffmpeg-location', path.dirname(findBinary('ffmpeg'))
+    '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
+    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
   ]
-  if (targetUrl !== pageURL) args.push('--add-header', `Referer: ${pageURL}`)
+  if (targetUrl !== pageURL) {
+    args.push('--add-header', `Referer: ${pageURL}`)
+  }
   args.push(targetUrl)
 
   const proc = spawn(bin, args)

@@ -22,9 +22,10 @@ let activeBrowserTabId = null
   bindIPCListeners()
   
   // Create initial tab
-  const id = await window.api.createTab(settings.homepage || 'https://www.youtube.com')
+  const id = await window.api.createTab(settings.homepage || 'https://www.google.com')
   browserTabsList.push({ id, url: '', title: 'New Tab', loading: false })
   activeBrowserTabId = id
+  window.api.switchTab(id)
   renderBrowserTabs()
 })()
 
@@ -46,7 +47,7 @@ function bindEvents() {
   $('btn-settings').addEventListener('click', () => switchTab('settings'))
 
   $('btn-new-tab').addEventListener('click', async () => {
-    const id = await window.api.createTab(settings.homepage || 'https://www.youtube.com')
+    const id = await window.api.createTab(settings.homepage || 'https://www.google.com')
     browserTabsList.push({ id, url: '', title: 'New Tab', loading: false })
     activeBrowserTabId = id
     window.api.switchTab(id)
@@ -664,7 +665,7 @@ function applySettingsToForm() {
   setVal('s-folder',        settings.saveFolder     || '')
   setVal('s-template',      settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s')
   setVal('s-concurrency',   String(settings.maxConcurrentDownloads || 3))
-  setVal('s-homepage',      settings.homepage || 'https://www.youtube.com')
+  setVal('s-homepage',      settings.homepage || 'https://www.google.com')
   setVal('s-audio-format',  settings.defaultAudioFormat || 'mp3')
   setVal('s-audio-quality', settings.audioQuality || '320')
 }
@@ -762,15 +763,12 @@ function buildDisplayFormats(formats) {
     if (!f || f.ext === 'mhtml') continue
 
     const isAudioOnly = f.vcodec === 'none'
-    const isVideoOnly = f.acodec === 'none'
-
     if (isAudioOnly) {
       if (!audioOnly || (f.tbr || 0) > (audioOnly.tbr || 0)) audioOnly = f
       continue
     }
 
-    const h = f.height
-    if (!h) continue
+    const h = f.height || 0
     const existing = byHeight.get(h)
     if (!existing || (f.tbr || 0) > (existing.tbr || 0)) byHeight.set(h, f)
   }
@@ -794,6 +792,8 @@ function enrichFormat(f) {
     else if (h >= 480)  displayRes = '480p'
     else if (h >= 360)  displayRes = '360p'
     else displayRes = `${h}p`
+  } else if (f.vcodec !== 'none') {
+    displayRes = f.format_note || 'Unknown resolution'
   }
 
   const vShort = f.vcodec && f.vcodec !== 'none' ? f.vcodec.split('.')[0] : null
@@ -813,9 +813,9 @@ function enrichFormat(f) {
 
 function buildFormatSelector(fmt) {
   if (fmt.vcodec === 'none') return 'bestaudio[ext=m4a]/bestaudio'
-  const h = fmt.height
+  const h = fmt.height || 0
   if (h) return `bestvideo[height<=${h}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${h}]+bestaudio/best[height<=${h}]`
-  return 'bestvideo+bestaudio/best'
+  return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
 }
 
 // ── Utils ─────────────────────────────────────────────────────────
