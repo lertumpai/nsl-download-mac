@@ -1,11 +1,13 @@
-# NSL Download — macOS Video Downloader
-### Product Specification v1.0
+# NSL Download — Video Downloader Browser
+### Product Specification v2.0
 
 ---
 
 ## 1. Overview
 
-**NSL Download** is a native macOS application that lets users paste any video URL and instantly download the video — including streaming content from platforms like YouTube, Facebook, VK, Twitch, TikTok, and hundreds more. The app handles adaptive streaming formats (HLS, DASH, RTMP) and automatically merges split audio/video streams into a single output file.
+**NSL Download** is a desktop application that embeds a full web browser. The user browses to any website normally — YouTube, Facebook, VK, TikTok, etc. — and the app automatically detects video streams playing on the page. A sidebar shows each detected video with a one-click **Download** button. No URL copying or pasting required.
+
+Login to private content works naturally because the user is already authenticated inside the embedded browser.
 
 ---
 
@@ -13,138 +15,119 @@
 
 | Goal | Description |
 |------|-------------|
-| **Simplicity** | Paste a link → pick quality → download. Zero technical knowledge required. |
-| **Breadth** | Support 1,000+ sites via a proven extraction backend (yt-dlp). |
-| **Streaming** | Handle HLS (`.m3u8`), MPEG-DASH (`.mpd`), and RTMP streams natively. |
-| **Muxing** | Auto-merge separate audio + video tracks into one `.mp4` / `.mkv` file. |
-| **Native feel** | Looks and behaves like a real macOS app (menu bar, notifications, dark mode). |
+| **Browse naturally** | Full Chromium browser embedded in the app — user just watches the page load |
+| **Auto-detect** | Intercept HLS / DASH / direct video URLs from network traffic as they stream |
+| **One-click download** | Click Download on detected video → pick quality → done |
+| **Login solved** | No cookie import needed — user logs into sites inside the app |
+| **Breadth** | yt-dlp handles 1,000+ sites; network interception catches everything else |
 
 ---
 
 ## 3. Target Platforms
 
 - **OS**: macOS 13 Ventura and later (Apple Silicon + Intel)
-- **Architecture**: Universal Binary (arm64 + x86_64)
+- **Runtime**: Electron (Chromium + Node.js, universal binary)
 
 ---
 
 ## 4. Supported Video Sources
 
-### Tier 1 (fully tested & prioritised)
-| Platform | URL Examples | Notes |
-|----------|-------------|-------|
-| YouTube | `youtube.com/watch`, `youtu.be` | Adaptive streams (DASH), age-gated content |
-| Facebook | `fb.com/video`, `fb.watch` | Public + logged-in content |
-| VK | `vk.com/video` | Requires session cookie for private videos |
-| Instagram | Reels, Posts, Stories | |
-| TikTok | Standard & live | |
-| Twitter / X | Video tweets | |
-| Twitch | VODs + Clips | |
+Detection works at two levels:
 
-### Tier 2 (community-tested via yt-dlp)
-- Vimeo, Dailymotion, Bilibili, Reddit, Streamable, Rumble, Odysee, and 1,000+ others.
+### Level 1 — Network interception (catches everything)
+The app monitors every network request the embedded browser makes. Any URL matching these patterns triggers a detected-video entry:
 
-### Streaming Formats Supported
-| Format | Protocol | Notes |
-|--------|----------|-------|
-| HLS | `m3u8` | Multi-bitrate, segmented |
-| MPEG-DASH | `mpd` | Separate audio/video streams |
-| RTMP / RTMPS | `rtmp://` | Live and archived |
-| Progressive MP4 | `https://` | Direct file |
-| WebM / VP9 | `https://` | YouTube fallback |
+| Pattern | Type | Example |
+|---------|------|---------|
+| `*.m3u8` in URL | HLS stream | Twitch, live streams |
+| `*.mpd` in URL | MPEG-DASH | YouTube adaptive |
+| `content-type: video/*` | Direct video | MP4, WebM files |
+| `content-type: application/x-mpegurl` | HLS | HLS servers |
+| `videoplayback` + `googlevideo.com` | YouTube | YouTube internal |
+
+### Level 2 — DOM scan (catches `<video>` elements)
+After each page load, the app scans `document.querySelectorAll('video')` for `src` / `currentSrc` attributes.
+
+### Level 3 — yt-dlp fallback
+For any detected page, the user can always trigger a manual yt-dlp analysis from the sidebar to get the full format list including formats not visible in network traffic.
 
 ---
 
 ## 5. Core Features
 
-### 5.1 URL Input & Detection
-- **Paste & Go**: User pastes a URL; app immediately fetches video metadata (title, thumbnail, duration, available formats).
-- **Clipboard Watch** *(optional)*: Auto-detects a valid video URL copied to the clipboard and shows a mini prompt.
-- **Batch Input**: Accept multiple URLs at once (newline-separated or drag-and-drop a `.txt` file).
+### 5.1 Embedded Browser
+- Full Chromium engine via Electron `BrowserView` / `WebContentsView`
+- Navigation toolbar: Back, Forward, Reload, address bar with search fallback (Google)
+- Cookies and session persist across app launches (`persist:browser` partition)
+- New tab support (Cmd+T)
 
-### 5.2 Quality & Format Selection
-- Display all available streams grouped by resolution: `4K`, `1080p`, `720p`, `480p`, `360p`, `Audio Only`.
-- Show codec info (H.264, H.265/HEVC, AV1, VP9, AAC, Opus).
-- Let the user set a **default quality** in preferences so single-click download works instantly.
+### 5.2 Video Detection Sidebar
+- Fixed right panel (320 px) always visible alongside the browser
+- One entry per page — deduplicated by page URL
+- Shows: page title, favicon, detected stream type badge (HLS / DASH / MP4 / YouTube)
+- **Download** button on each entry opens the quality picker
+- **Analyse with yt-dlp** button for manual metadata fetch
 
-### 5.3 Stream Merging (Muxing)
-> **IMPORTANT**: Many platforms (especially YouTube) serve audio and video as **separate adaptive streams**. The app must automatically detect this and merge them using FFmpeg before presenting the final file to the user.
-
-- **Automatic mux**: After segments are downloaded, `ffmpeg` merges audio + video losslessly (`-c copy`).
-- **Progress**: Show combined progress (download segments → mux → done).
-- **Output format**: User can choose `.mp4` (default), `.mkv`, or `.webm`.
+### 5.3 Quality Picker
+- Appears inline in sidebar after clicking Download
+- Calls `yt-dlp --dump-json <pageURL>` to retrieve all formats
+- Formats grouped by resolution: 4K, 1080p, 720p, 480p, 360p, Audio Only
+- Shows codec (H.264, H.265, AV1, VP9) and estimated file size
+- Default quality preference applied automatically
+- Output format selector: MP4 (default), MKV, WebM
 
 ### 5.4 Download Manager
-- Queue with live progress bar per item (speed, ETA, downloaded / total size).
-- Pause / Resume individual downloads.
-- Retry failed downloads with one click.
-- Concurrent downloads: configurable (default 3).
+- Queue section in sidebar below detected videos
+- Per-item progress bar: percentage, speed (MB/s), ETA
+- Pause / Resume / Cancel per item
+- Retry failed downloads
+- Concurrent downloads: configurable (default 3)
 
-### 5.5 Output & File Management
-- Default save folder: `~/Movies/NSL Downloads/` (configurable).
-- File naming template: `{title} [{resolution}].{ext}` (customisable).
-- Avoid duplicate filenames by auto-incrementing.
-- Open in Finder / Quick Look after completion.
+### 5.5 Stream Merging (Muxing)
+- yt-dlp calls FFmpeg internally via `--merge-output-format`
+- Progress shows "Merging…" stage after download segments complete
+- Both yt-dlp and FFmpeg bundled at `Resources/bin/`
 
-### 5.6 Authentication (Cookies)
-- Support importing browser cookies (Chrome, Firefox, Safari) via cookie file for gated content (Facebook private videos, VK login-required).
-- Store cookies securely in macOS Keychain.
+### 5.6 Output & File Management
+- Default save folder: `~/Movies/NSL Downloads/` (configurable)
+- Filename template: `%(title)s [%(height)sp].%(ext)s` (yt-dlp syntax)
+- Open file / Show in Finder buttons on completed items
 
-### 5.7 Notifications & Menu Bar
-- macOS native notifications when a download completes or fails.
-- Optional **menu bar icon** showing active downloads count + quick-add URL field.
+### 5.7 Notifications
+- macOS native notification when download completes or fails
 
 ---
 
-## 6. UI / UX Design
-
-### 6.1 Main Window Layout
+## 6. UI Layout
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  NSL Download                          ⬛ 🔴 🟡 🟢      │
-├──────────────────────────────────────────────────────────┤
-│  ┌──────────────────────────────────────┐  [Paste & Go] │
-│  │  Paste video URL here...             │               │
-│  └──────────────────────────────────────┘               │
-├──────────────────────────────────────────────────────────┤
-│  QUEUE                                                    │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │ 🎬 [Thumbnail] Title of Video         1080p MP4    │  │
-│  │              ████████████░░░░░░  62%  12.4 MB/s    │  │
-│  │              ETA: 0:42  |  [Pause]  [Cancel]       │  │
-│  ├────────────────────────────────────────────────────┤  │
-│  │ 🎬 [Thumbnail] Another Video          720p MP4     │  │
-│  │              Queued...                              │  │
-│  └────────────────────────────────────────────────────┘  │
-├──────────────────────────────────────────────────────────┤
-│  COMPLETED                                                │
-│  ✅ Video Name.mp4   1.2 GB   [Open File] [Show Finder]  │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  ← → ↺  [ https://www.youtube.com/watch?v=...    ] [⚙ Settings] │
+├──────────────────────────────────────────────────┬───────────────┤
+│                                                  │ DETECTED  (2) │
+│                                                  │ ┌───────────┐ │
+│                                                  │ │▶ YT Video │ │
+│         Chromium BrowserView                     │ │  YouTube  │ │
+│                                                  │ │[↓Download]│ │
+│         (full web browsing)                      │ └───────────┘ │
+│                                                  │ ┌───────────┐ │
+│                                                  │ │▶ FB Video │ │
+│                                                  │ │  HLS      │ │
+│                                                  │ │[↓Download]│ │
+│                                                  │ └───────────┘ │
+│                                                  ├───────────────┤
+│                                                  │ DOWNLOADING   │
+│                                                  │ ┌───────────┐ │
+│                                                  │ │ Title     │ │
+│                                                  │ │ ████░ 62% │ │
+│                                                  │ │ 12MB/s    │ │
+│                                                  │ └───────────┘ │
+│                                                  ├───────────────┤
+│                                                  │ COMPLETED     │
+│                                                  │ ✅ video.mp4  │
+│                                                  │ [Open][Finder]│
+└──────────────────────────────────────────────────┴───────────────┘
 ```
-
-### 6.2 Quality Picker Sheet (appears after URL analysis)
-```
-┌─────────────────────────────────────┐
-│  📺 "Video Title Here"              │
-│  ⏱ 12:34  •  youtube.com           │
-│  [Thumbnail]                        │
-│                                     │
-│  Select Format:                     │
-│  ○ 4K   H.265  ~800 MB              │
-│  ● 1080p H.264  ~350 MB  ← default  │
-│  ○ 720p  H.264  ~180 MB             │
-│  ○ Audio Only  AAC ~28 MB           │
-│                                     │
-│  Output: .mp4  ▾    [Download]      │
-└─────────────────────────────────────┘
-```
-
-### 6.3 Design Language
-- Follow macOS **Human Interface Guidelines**.
-- Support **Light and Dark Mode** automatically.
-- Use SF Pro typography with SF Symbols icons.
-- Accent color: configurable (defaults to system accent).
 
 ---
 
@@ -154,88 +137,90 @@
 
 | Layer | Technology | Reason |
 |-------|-----------|--------|
-| UI | **SwiftUI** (macOS) | Native, modern, Dark Mode auto |
-| Download Engine | **yt-dlp** (Python CLI, bundled) | Supports 1,000+ sites |
-| Stream Muxer | **FFmpeg** (bundled static binary) | Industry-standard A/V merge |
-| Process Mgmt | Swift `Process` / `AsyncStream` | Non-blocking, cancellable |
-| Storage | **Core Data** / SQLite | Queue persistence |
-| Keychain | **Security.framework** | Cookie / credential storage |
-| Notifications | **UserNotifications** | Native macOS alerts |
+| App shell | **Electron** (macOS) | Embeds Chromium, exposes Node.js for subprocess management |
+| Browser engine | **Chromium** (via BrowserView) | Full web browsing with request interception |
+| Video detection | `session.webRequest` + DOM scan | Catches HLS/DASH/direct video without any user action |
+| Download engine | **yt-dlp** (bundled binary) | 1,000+ site support, quality selection, muxing |
+| Stream muxer | **FFmpeg** (bundled binary) | Called internally by yt-dlp |
+| UI | Vanilla HTML/CSS/JS | Lightweight, no framework overhead |
+| Settings | **electron-store** | JSON persisted to app userData |
+| Notifications | Electron `Notification` API | Native macOS alerts |
 
 ### 7.2 Bundled Binaries
-Both `yt-dlp` and `ffmpeg` will be **shipped inside the app bundle** (`Contents/MacOS/bin/`) so users need no separate installation.
 
-- `yt-dlp`: universal Python-compiled binary (no Python runtime needed).
-- `ffmpeg`: static universal binary from `evermeet.cx/ffmpeg` or compiled from source.
+Both `yt-dlp` and `ffmpeg` shipped inside the app at `Resources/bin/` (via `electron-builder` `extraResources`). Fall back to Homebrew paths (`/opt/homebrew/bin/`) for development.
 
-### 7.3 Download Flow
+### 7.3 Detection Flow
 
 ```
-User → Paste URL
-  → App calls: yt-dlp --dump-json <URL>
-  → yt-dlp returns: JSON metadata (formats, title, thumbnail)
-  → App shows: Quality Picker to User
-  → User selects quality & confirms
-  → App calls: yt-dlp -f <format> -o <path> <URL>
-  → yt-dlp streams: Progress via stdout
-  → yt-dlp calls: FFmpeg internally for muxing (--merge-output-format)
-  → FFmpeg completes mux
-  → App sends: macOS Notification + file is ready
+User browses → page loads in BrowserView
+  → session.webRequest.onCompleted fires for every network request
+  → main.js checks URL/Content-Type for video patterns
+  → match found → deduplicate by pageURL → send IPC to renderer
+  → sidebar shows new entry with [↓ Download] button
+  (simultaneously)
+  → page finish loading → executeJavaScript scans <video> elements
+  → any new src found → same dedup + IPC flow
 ```
 
-### 7.4 Progress Parsing
-Parse yt-dlp stdout lines matching:
+### 7.4 Download Flow
+
+```
+User clicks Download on sidebar entry
+  → renderer sends IPC: fetch-metadata(pageURL)
+  → main.js: spawn yt-dlp --dump-json <pageURL>
+  → formats returned → renderer shows quality picker inline
+  → user picks format → renderer sends IPC: start-download(opts)
+  → main.js: spawn yt-dlp -f <format> -o <template> <pageURL>
+  → stdout lines parsed for progress → IPC to renderer → progress bar
+  → yt-dlp calls FFmpeg internally for muxing
+  → process exits 0 → IPC download-complete → notification
+```
+
+### 7.5 Progress Parsing
+
+Same yt-dlp stdout format as v1:
 ```
 [download]  62.5% of  350.00MiB at   12.40MiB/s ETA 00:42
 [ffmpeg] Merging formats into "output.mp4"
 ```
-Update SwiftUI `@Published` progress model in real-time via `AsyncStream`.
-
-### 7.5 Cookie Import
-- User selects browser → app reads cookie store (using `--cookies-from-browser chrome` yt-dlp flag).
-- Alternatively, import a Netscape-format `cookies.txt` file.
 
 ---
 
-## 8. Preferences / Settings
+## 8. Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Default quality | 1080p | Quality auto-selected on download |
-| Default format | MP4 | Container format |
+| Default quality | 1080p | Pre-selected in quality picker |
+| Default format | mp4 | Merge output format |
 | Save folder | `~/Movies/NSL Downloads` | Output directory |
-| Filename template | `{title} [{height}p].{ext}` | Rename pattern |
+| Filename template | `%(title)s [%(height)sp].%(ext)s` | yt-dlp output template |
 | Max concurrent downloads | 3 | Parallelism |
-| Embed thumbnail | Off | Write thumbnail into MP4 metadata |
-| Embed subtitles | Off | Download & embed `.srt` / `.vtt` |
-| Clipboard monitoring | Off | Auto-detect copied video URLs |
-| Menu bar icon | On | Show downloads in menu bar |
-| Cookie browser | None | Browser for cookie extraction |
+| Homepage | `https://www.youtube.com` | Browser start page |
 
 ---
 
 ## 9. Error Handling
 
-| Error | User-facing Message | Action |
-|-------|---------------------|--------|
-| Unsupported URL | "This URL is not supported." | Link to supported sites list |
-| Private / login required | "This video requires login. Please import cookies." | Open cookie import dialog |
-| Network timeout | "Download failed. Check your connection." | Retry button |
-| Disk full | "Not enough disk space." | Open storage settings |
-| Mux failed | "Could not merge audio/video." | Offer raw streams as fallback |
-| yt-dlp outdated | "Extractor needs update." | Auto-update yt-dlp binary |
+| Error | Message | Action |
+|-------|---------|--------|
+| yt-dlp not found | "yt-dlp not installed" | Link to install instructions |
+| Unsupported URL | "Site not supported" | Suggest manual yt-dlp |
+| Login required | *(shouldn't happen — user is already logged in)* | Prompt user to log in inside the browser |
+| Network error | "Download failed. Check connection." | Retry button |
+| Disk full | "Not enough disk space." | Open save folder settings |
+| Mux failed | "Could not merge streams." | Offer raw video file |
 
 ---
 
-## 10. Distribution & Updates
+## 10. Distribution
 
 | Item | Detail |
 |------|--------|
-| Distribution | Direct download (DMG) + Mac App Store (if sandboxing allows) |
-| Notarization | Apple notarized (required for Gatekeeper) |
-| Auto-update | **Sparkle** framework for direct DMG distribution |
-| yt-dlp update | In-app "Update Extractor" button (downloads latest `yt-dlp` release from GitHub) |
-| License | To be decided (proprietary / MIT) |
+| Distribution | DMG via `electron-builder` |
+| Auto-update | `electron-updater` |
+| Notarization | `electron-builder` + Apple notarize |
+| yt-dlp update | In-settings "Update yt-dlp" button |
 
 ---
 
@@ -243,37 +228,24 @@ Update SwiftUI `@Published` progress model in real-time via `AsyncStream`.
 
 | Milestone | Deliverables | Est. Duration |
 |-----------|-------------|---------------|
-| **M1 — Core Engine** | Bundle yt-dlp + ffmpeg, run download from CLI wrapper, parse progress | 1 week |
-| **M2 — Basic UI** | SwiftUI main window, URL input, quality picker, download queue | 1.5 weeks |
-| **M3 — Streaming & Mux** | HLS/DASH/RTMP support, auto-mux, combined progress tracking | 1 week |
-| **M4 — Polish** | Preferences, notifications, menu bar, Dark Mode, error handling | 1 week |
-| **M5 — Distribution** | Signing, notarization, DMG packaging, Sparkle updates | 0.5 week |
+| **M1 — Browser shell** | Electron window, BrowserView, toolbar navigation | 3 days |
+| **M2 — Detection** | webRequest interceptor, DOM scan, sidebar entries | 3 days |
+| **M3 — Download** | yt-dlp integration, quality picker, progress | 4 days |
+| **M4 — Polish** | Settings, notifications, dark mode, error handling | 3 days |
+| **M5 — Distribution** | electron-builder, signing, notarization, DMG | 2 days |
 
-**Total estimate: ~5 weeks for v1.0**
+**Total estimate: ~3 weeks for v1.0**
 
 ---
 
 ## 12. Out of Scope (v1.0)
 
-- iOS / iPadOS version
-- Browser extension integration
-- Cloud sync / remote queue
+- Windows / Linux builds (architecture supports it, not prioritised)
+- Browser extensions
 - Scheduled downloads
-- Post-processing (trim, compress, convert)
-- Downloading DRM-protected content (Netflix, Disney+, etc.)
+- Post-processing (trim, convert)
+- DRM-protected content (Netflix, Disney+)
 
 ---
 
-## 13. Open Questions
-
-Please review and answer these before development begins:
-
-1. **Distribution**: App Store or direct DMG download only? (App Store sandbox may restrict bundling yt-dlp/ffmpeg.)
-2. **Monetisation**: Free, one-time purchase, or freemium (e.g., limit concurrent downloads on free tier)?
-3. **App Name / Branding**: Is "NSL Download" the final name? Any icon/brand guidelines?
-4. **Cookie / Login support priority**: Is Facebook private video support a must-have for v1.0?
-5. **Language localisation**: Thai + English from day one, or English first?
-
----
-
-*Spec written: 2026-05-02 | Author: Antigravity (AI) | Version: 1.0*
+*Spec updated: 2026-05-02 | Version: 2.0 — Electron browser approach*

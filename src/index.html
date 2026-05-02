@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;">
+  <title>NSL Download</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ── Toolbar ──────────────────────────────────────────────────── -->
+<div id="toolbar">
+  <button class="nav-btn" id="btn-back"    title="Back"    disabled>‹</button>
+  <button class="nav-btn" id="btn-forward" title="Forward" disabled>›</button>
+  <button class="nav-btn" id="btn-reload"  title="Reload">↺</button>
+
+  <input id="address-bar" type="text" spellcheck="false"
+         placeholder="Search or enter URL…" value="https://www.youtube.com">
+
+  <div id="loading-indicator"></div>
+
+  <button class="nav-btn" id="btn-settings" title="Settings" style="font-size:16px">⚙</button>
+</div>
+
+<!-- ── Main area ────────────────────────────────────────────────── -->
+<div id="main">
+  <!-- BrowserView is drawn here by Electron; this div is just a background -->
+  <div id="browser-area"></div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div id="sidebar-tabs">
+      <button class="tab-btn active" data-tab="detected">DETECTED</button>
+      <button class="tab-btn"        data-tab="queue">QUEUE</button>
+      <button class="tab-btn"        data-tab="done">DONE</button>
+      <button class="tab-btn"        data-tab="settings">SETTINGS</button>
+    </div>
+
+    <!-- Detected videos -->
+    <div id="panel-detected" class="panel active">
+      <div class="empty-state" id="detected-empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>
+        </svg>
+        <p>Browse to any page.<br>Detected videos appear here.</p>
+      </div>
+      <div id="detected-list"></div>
+    </div>
+
+    <!-- Download queue -->
+    <div id="panel-queue" class="panel">
+      <div class="empty-state" id="queue-empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17v2a2 2 0 002 2h16a2 2 0 002-2v-2"/>
+        </svg>
+        <p>No active downloads.</p>
+      </div>
+      <div id="queue-list"></div>
+    </div>
+
+    <!-- Completed -->
+    <div id="panel-done" class="panel">
+      <div class="empty-state" id="done-empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <polyline points="20,6 9,17 4,12"/>
+        </svg>
+        <p>Completed downloads appear here.</p>
+      </div>
+      <div id="done-list"></div>
+    </div>
+
+    <!-- Settings -->
+    <div id="panel-settings" class="panel">
+      <div class="settings-panel">
+        <div class="setting-row">
+          <label class="setting-label">DEFAULT QUALITY</label>
+          <select class="setting-input" id="s-quality">
+            <option value="4K">4K</option>
+            <option value="1080p" selected>1080p</option>
+            <option value="720p">720p</option>
+            <option value="480p">480p</option>
+            <option value="360p">360p</option>
+            <option value="Audio Only">Audio Only</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">DEFAULT FORMAT</label>
+          <select class="setting-input" id="s-format">
+            <option value="mp4" selected>MP4</option>
+            <option value="mkv">MKV</option>
+            <option value="webm">WebM</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">SAVE FOLDER</label>
+          <div class="setting-row-inline">
+            <input class="setting-input" id="s-folder" type="text" readonly style="flex:1;cursor:pointer">
+            <button class="btn btn-secondary" style="height:26px;flex:0 0 auto;padding:0 10px"
+                    id="btn-choose-folder">…</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">FILENAME TEMPLATE</label>
+          <input class="setting-input" id="s-template" type="text">
+          <span style="font-size:10px;color:var(--text3);margin-top:2px">
+            Variables: %(title)s %(height)sp %(ext)s %(id)s
+          </span>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">CONCURRENT DOWNLOADS</label>
+          <input class="setting-input" id="s-concurrency" type="number" min="1" max="10">
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">HOMEPAGE</label>
+          <input class="setting-input" id="s-homepage" type="text">
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /sidebar -->
+</div><!-- /main -->
+
+<script src="renderer.js"></script>
+</body>
+</html>
