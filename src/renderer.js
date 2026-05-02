@@ -8,7 +8,11 @@ let activeQualityPicker = null   // pageURL currently showing quality picker
 
 // Playlist state
 let currentPlaylist = null        // { url, listId, title, entries[] }
-let playlistView    = false        // true = showing playlist panel
+let playlistView    = false       // true = showing playlist panel
+
+// Browser Tabs state
+let browserTabsList = []          // [{ id, url, title, loading }]
+let activeBrowserTabId = null
 
 // ── Boot ─────────────────────────────────────────────────────────
 ;(async () => {
@@ -16,6 +20,12 @@ let playlistView    = false        // true = showing playlist panel
   applySettingsToForm()
   bindEvents()
   bindIPCListeners()
+  
+  // Create initial tab
+  const id = await window.api.createTab(settings.homepage || 'https://www.youtube.com')
+  browserTabsList.push({ id, url: '', title: 'New Tab', loading: false })
+  activeBrowserTabId = id
+  renderBrowserTabs()
 })()
 
 // ── Toolbar / navigation ─────────────────────────────────────────
@@ -35,6 +45,14 @@ function bindEvents() {
   btnRel.addEventListener('click',     () => window.api.reload())
   $('btn-settings').addEventListener('click', () => switchTab('settings'))
 
+  $('btn-new-tab').addEventListener('click', async () => {
+    const id = await window.api.createTab(settings.homepage || 'https://www.youtube.com')
+    browserTabsList.push({ id, url: '', title: 'New Tab', loading: false })
+    activeBrowserTabId = id
+    window.api.switchTab(id)
+    renderBrowserTabs()
+  })
+
   // Sidebar tabs
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab))
@@ -45,16 +63,45 @@ function bindEvents() {
 }
 
 function bindIPCListeners() {
-  window.api.on('browser:navigate', (url, title) => {
-    $('address-bar').value = url
-    $('btn-back').disabled    = false
-    $('btn-forward').disabled = false
+  window.api.on('browser:navigate', ({ tabId, url, title }) => {
+    const tab = browserTabsList.find(t => t.id === tabId)
+    if (tab) {
+      tab.url = url
+      tab.title = title || tab.title
+    }
+    if (tabId === activeBrowserTabId) {
+      $('address-bar').value = url
+      $('btn-back').disabled    = false
+      $('btn-forward').disabled = false
+    }
+    renderBrowserTabs()
   })
 
-  window.api.on('browser:loading', loading => {
-    $('loading-indicator').classList.toggle('active', loading)
-    $('btn-reload').textContent = loading ? '✕' : '↺'
-    $('btn-reload').title = loading ? 'Stop' : 'Reload'
+  window.api.on('browser:loading', ({ tabId, loading }) => {
+    const tab = browserTabsList.find(t => t.id === tabId)
+    if (tab) tab.loading = loading
+    
+    if (tabId === activeBrowserTabId) {
+      $('loading-indicator').classList.toggle('active', loading)
+      $('btn-reload').textContent = loading ? '✕' : '↺'
+      $('btn-reload').title = loading ? 'Stop' : 'Reload'
+    }
+  })
+
+  window.api.on('browser:title', ({ tabId, title }) => {
+    const tab = browserTabsList.find(t => t.id === tabId)
+    if (tab) {
+      tab.title = title
+      renderBrowserTabs()
+    }
+  })
+
+  window.api.on('tab:new-requested', async (url) => {
+    const id = await window.api.createTab(url)
+    browserTabsList.push({ id, url: url, title: 'Loading...', loading: true })
+    activeBrowserTabId = id
+    window.api.switchTab(id)
+    renderBrowserTabs()
   })
 
   window.api.on('video:detected', ({ pageURL, pageTitle, types }) => {
@@ -306,9 +353,9 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
 }
 
 // ── Audio extraction ──────────────────────────────────────────────
-async function extractAudioFromPage({ pageURL, title, audioFormat }) {
+async function extractAudioFromPage({ pageURL, title, audioFormat, filePrefix }) {
   const id = await window.api.extractAudio({
-    pageURL, audioFormat: audioFormat || settings.defaultAudioFormat || 'mp3', title
+    pageURL, audioFormat: audioFormat || settings.defaultAudioFormat || 'mp3', title, filePrefix
   })
   downloads.set(id, {
     id, pageURL, title,
@@ -476,12 +523,16 @@ async function downloadSelectedPlaylistItems() {
     const chk = row.querySelector('.pl-entry-chk')
     if (!chk?.checked) continue
     const url   = row.dataset.entryUrl
-    const title = row.querySelector('.pl-entry-title')?.textContent || 'Video'
+    const rawIdx = row.querySelector('.pl-entry-index')?.textContent || ''
+    const indexPadded = rawIdx.replace('.', '').padStart(2, '0') // e.g. "01"
+    
+    const rawTitle = row.querySelector('.pl-entry-title')?.textContent || 'Video'
+    const title = indexPadded ? `${indexPadded} - ${rawTitle}` : rawTitle
     
     if (isAudio) {
-      await extractAudioFromPage({ pageURL: url, title, audioFormat: format })
+      await extractAudioFromPage({ pageURL: url, title, audioFormat: format, filePrefix: indexPadded })
     } else {
-      await startDownload({ pageURL: url, title, formatSelector, outputFormat: format })
+      await startDownload({ pageURL: url, title, formatSelector, outputFormat: format, filePrefix: indexPadded })
     }
     count++
   }
@@ -498,9 +549,9 @@ function formatDuration(secs) {
 }
 
 // ── Download management ───────────────────────────────────────────
-async function startDownload({ pageURL, title, formatSelector, outputFormat }) {
+async function startDownload({ pageURL, title, formatSelector, outputFormat, filePrefix }) {
   const id = await window.api.startDownload({
-    pageURL, formatSelector, title,
+    pageURL, formatSelector, title, filePrefix,
     outputFormat: outputFormat || settings.defaultFormat || 'mp4'
   })
 
@@ -641,7 +692,53 @@ function bindSettingsForm() {
   })
 }
 
-// ── Tab switching ─────────────────────────────────────────────────
+// ── Browser Tabs UI ────────────────────────────────────────────────
+function renderBrowserTabs() {
+  const container = $('browser-tabs-list')
+  if (!container) return
+  container.innerHTML = ''
+
+  browserTabsList.forEach(tab => {
+    const el = document.createElement('div')
+    el.className = 'browser-tab' + (tab.id === activeBrowserTabId ? ' active' : '')
+    el.title = tab.title
+    
+    el.innerHTML = `
+      <span class="browser-tab-title">${esc(tab.title || 'New Tab')}</span>
+      <button class="browser-tab-close" title="Close">✕</button>
+    `
+
+    // Switch tab on click
+    el.addEventListener('click', (e) => {
+      if (e.target.classList.contains('browser-tab-close')) return
+      activeBrowserTabId = tab.id
+      window.api.switchTab(tab.id)
+      renderBrowserTabs()
+    })
+
+    // Close tab on click
+    el.querySelector('.browser-tab-close').addEventListener('click', () => {
+      window.api.closeTab(tab.id)
+      const idx = browserTabsList.findIndex(t => t.id === tab.id)
+      browserTabsList.splice(idx, 1)
+      
+      if (browserTabsList.length === 0) {
+        // If last tab closed, create a new empty one
+        $('btn-new-tab').click()
+      } else if (activeBrowserTabId === tab.id) {
+        // If active tab closed, switch to the previous one (or next if it was first)
+        const newActive = browserTabsList[Math.max(0, idx - 1)]
+        activeBrowserTabId = newActive.id
+        window.api.switchTab(newActive.id)
+      }
+      renderBrowserTabs()
+    })
+
+    container.appendChild(el)
+  })
+}
+
+// ── Sidebar Tabs ──────────────────────────────────────────────────
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === name))

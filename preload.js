@@ -1,11 +1,15 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('api', {
-  // Browser navigation
+  // Browser navigation & tabs
   go:      (url)  => ipcRenderer.send('browser:go', url),
   back:    ()     => ipcRenderer.send('browser:back'),
   forward: ()     => ipcRenderer.send('browser:forward'),
   reload:  ()     => ipcRenderer.send('browser:reload'),
+  
+  createTab: (url)   => ipcRenderer.invoke('tab:create', url),
+  switchTab: (tabId) => ipcRenderer.send('tab:switch', tabId),
+  closeTab:  (tabId) => ipcRenderer.send('tab:close', tabId),
 
   // yt-dlp
   fetchMetadata: (url)  => ipcRenderer.invoke('ytdlp:metadata', url),

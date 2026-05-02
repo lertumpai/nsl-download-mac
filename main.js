@@ -51,11 +51,13 @@ try {
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
+const TOOLBAR_HEIGHT = 80 // Increased to fit tab bar
 const SIDEBAR_WIDTH = 330
-const TOOLBAR_HEIGHT = 50
 
 let mainWindow = null
-let browserView = null
+const browserTabs = new Map() // tabId -> BrowserView
+let activeTabId = null
+let tabIdCounter = 0
 
 // pageURL → { pageURL, pageTitle, favicon, types: Set, timestamp }
 const detectedByPage = new Map()
@@ -109,55 +111,6 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'))
 
-  // Embedded browser (separate session so cookies persist independently)
-  browserView = new BrowserView({
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      partition: 'persist:browser',
-      spellcheck: false
-    }
-  })
-
-  mainWindow.setBrowserView(browserView)
-  repositionBrowserView()
-
-  browserView.webContents.loadURL(store.get('homepage') || 'https://www.youtube.com')
-  browserView.webContents.setWindowOpenHandler(({ url }) => {
-    // Open in same BrowserView rather than a new Electron window
-    browserView.webContents.loadURL(url)
-    return { action: 'deny' }
-  })
-
-  // Forward browser events to renderer
-  browserView.webContents.on('did-navigate', (_, url) => {
-    mainWindow.webContents.send('browser:navigate', url, browserView.webContents.getTitle())
-    scanDOMForVideos()
-    checkForPlaylist(url)
-  })
-  browserView.webContents.on('did-navigate-in-page', (_, url) => {
-    mainWindow.webContents.send('browser:navigate', url, browserView.webContents.getTitle())
-    checkForPlaylist(url)
-  })
-  browserView.webContents.on('page-title-updated', (_, title) => {
-    mainWindow.webContents.send('browser:title', title)
-    // Update cached title for this page
-    const url = browserView.webContents.getURL()
-    if (detectedByPage.has(url)) detectedByPage.get(url).pageTitle = title
-  })
-  browserView.webContents.on('did-start-loading', () =>
-    mainWindow.webContents.send('browser:loading', true))
-  browserView.webContents.on('did-stop-loading', () => {
-    mainWindow.webContents.send('browser:loading', false)
-    scanDOMForVideos()
-  })
-  browserView.webContents.on('page-favicon-updated', (_, favicons) => {
-    const url = browserView.webContents.getURL()
-    if (favicons.length && detectedByPage.has(url)) {
-      detectedByPage.get(url).favicon = favicons[0]
-    }
-  })
-
   mainWindow.on('resize', () => {
     repositionBrowserView()
     const [w, h] = mainWindow.getSize()
@@ -167,10 +120,101 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
+function createBrowserTab(url) {
+  const tabId = String(++tabIdCounter)
+  const view = new BrowserView({
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      partition: 'persist:browser',
+      spellcheck: false
+    }
+  })
+  
+  browserTabs.set(tabId, view)
+  
+  view.webContents.setWindowOpenHandler(({ url: newUrl }) => {
+    // Force popups/ads to open in a new tab instead of a new window
+    mainWindow?.webContents.send('tab:new-requested', newUrl)
+    return { action: 'deny' }
+  })
+
+  // Forward browser events to renderer, tagged with tabId
+  view.webContents.on('did-navigate', (_, navUrl) => {
+    mainWindow?.webContents.send('browser:navigate', { tabId, url: navUrl, title: view.webContents.getTitle() })
+    if (tabId === activeTabId) {
+      scanDOMForVideos()
+      checkForPlaylist(navUrl)
+    }
+  })
+  view.webContents.on('did-navigate-in-page', (_, navUrl) => {
+    mainWindow?.webContents.send('browser:navigate', { tabId, url: navUrl, title: view.webContents.getTitle() })
+    if (tabId === activeTabId) checkForPlaylist(navUrl)
+  })
+  view.webContents.on('page-title-updated', (_, title) => {
+    mainWindow?.webContents.send('browser:title', { tabId, title })
+    const navUrl = view.webContents.getURL()
+    if (detectedByPage.has(navUrl)) detectedByPage.get(navUrl).pageTitle = title
+  })
+  view.webContents.on('did-start-loading', () => {
+    mainWindow?.webContents.send('browser:loading', { tabId, loading: true })
+  })
+  view.webContents.on('did-stop-loading', () => {
+    mainWindow?.webContents.send('browser:loading', { tabId, loading: false })
+    if (tabId === activeTabId) scanDOMForVideos()
+  })
+  view.webContents.on('page-favicon-updated', (_, favicons) => {
+    const navUrl = view.webContents.getURL()
+    if (favicons.length && detectedByPage.has(navUrl)) {
+      detectedByPage.get(navUrl).favicon = favicons[0]
+    }
+  })
+
+  if (url) view.webContents.loadURL(url)
+  return tabId
+}
+
+function switchBrowserTab(tabId) {
+  if (!browserTabs.has(tabId) || !mainWindow) return
+  activeTabId = tabId
+  const view = browserTabs.get(tabId)
+  mainWindow.setBrowserView(view)
+  repositionBrowserView()
+  
+  // Inform renderer of the state of the newly active tab
+  mainWindow.webContents.send('browser:navigate', { 
+    tabId, 
+    url: view.webContents.getURL(), 
+    title: view.webContents.getTitle() 
+  })
+  mainWindow.webContents.send('browser:loading', { 
+    tabId, 
+    loading: view.webContents.isLoading() 
+  })
+}
+
+function closeBrowserTab(tabId) {
+  if (!browserTabs.has(tabId)) return
+  const view = browserTabs.get(tabId)
+  if (mainWindow && activeTabId === tabId) {
+    mainWindow.removeBrowserView(view)
+    activeTabId = null
+  }
+  // Destroy webContents to free memory
+  view.webContents.destroy()
+  browserTabs.delete(tabId)
+}
+
+function getActiveView() {
+  return activeTabId ? browserTabs.get(activeTabId) : null
+}
+
 function repositionBrowserView() {
-  if (!mainWindow || !browserView) return
+  if (!mainWindow || !activeTabId) return
+  const view = browserTabs.get(activeTabId)
+  if (!view) return
   const { width, height } = mainWindow.getContentBounds()
-  browserView.setBounds({
+  view.setBounds({
     x: 0,
     y: TOOLBAR_HEIGHT,
     width: Math.max(0, width - SIDEBAR_WIDTH),
@@ -185,7 +229,18 @@ function setupVideoInterception() {
   const browserSession = session.fromPartition('persist:browser')
 
   browserSession.webRequest.onCompleted({ urls: ['*://*/*'] }, (details) => {
-    if (!browserView) return
+    // Find which tab made the request
+    let requestingTabId = null
+    let requestingView = null
+    for (const [tId, view] of browserTabs.entries()) {
+      if (view.webContents.id === details.webContentsId) {
+        requestingTabId = tId
+        requestingView = view
+        break
+      }
+    }
+    
+    if (!requestingView) return
 
     const url = details.url
     const contentType = (details.responseHeaders?.['content-type']?.[0] || '').toLowerCase()
@@ -193,9 +248,11 @@ function setupVideoInterception() {
     const type = classifyRequest(url, contentType)
     if (!type) return
 
-    const pageURL = browserView.webContents.getURL()
-    const pageTitle = browserView.webContents.getTitle()
-    recordDetection(pageURL, pageTitle, type)
+    const pageURL = requestingView.webContents.getURL()
+    const pageTitle = requestingView.webContents.getTitle()
+    
+    // Only send IPC if this is the active tab
+    recordDetection(pageURL, pageTitle, type, requestingTabId === activeTabId)
   })
 }
 
@@ -237,17 +294,18 @@ function recordDetection(pageURL, pageTitle, type) {
 }
 
 async function scanDOMForVideos() {
-  if (!browserView) return
+  const view = getActiveView()
+  if (!view) return
   try {
-    const found = await browserView.webContents.executeJavaScript(`
+    const found = await view.webContents.executeJavaScript(`
       (function() {
         return Array.from(document.querySelectorAll('video'))
           .map(v => v.src || v.currentSrc)
           .filter(s => s && s.startsWith('http'))
       })()
     `)
-    const pageURL = browserView.webContents.getURL()
-    const pageTitle = browserView.webContents.getTitle()
+    const pageURL = view.webContents.getURL()
+    const pageTitle = view.webContents.getTitle()
     for (const src of found) {
       const type = classifyRequest(src, '')
       recordDetection(pageURL, pageTitle, type || 'Video')
@@ -278,24 +336,38 @@ function checkForPlaylist(url) {
 // IPC — browser navigation
 // ---------------------------------------------------------------------------
 ipcMain.on('browser:go', (_, input) => {
-  if (!browserView) return
+  const view = getActiveView()
+  if (!view) return
   let url = input.trim()
   if (!url) return
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    // Looks like a real domain?
-    if (/^[\w-]+(\.[a-z]{2,})+/.test(url) && !url.includes(' ')) {
-      url = 'https://' + url
+  
+  // Quick fix: assume domain if no protocol and no spaces
+  if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('file://')) {
+    if (url.includes(' ') || !url.includes('.')) {
+      url = `https://duckduckgo.com/?q=${encodeURIComponent(url)}`
     } else {
-      url = 'https://www.google.com/search?q=' + encodeURIComponent(url)
+      url = 'https://' + url
     }
   }
-  // Clear old detections when navigating away
-  browserView.webContents.loadURL(url)
+  view.webContents.loadURL(url)
 })
 
-ipcMain.on('browser:back',    () => browserView?.webContents.canGoBack()    && browserView.webContents.goBack())
-ipcMain.on('browser:forward', () => browserView?.webContents.canGoForward() && browserView.webContents.goForward())
-ipcMain.on('browser:reload',  () => browserView?.webContents.reload())
+ipcMain.on('browser:back',    () => getActiveView()?.webContents.canGoBack()    && getActiveView().webContents.goBack())
+ipcMain.on('browser:forward', () => getActiveView()?.webContents.canGoForward() && getActiveView().webContents.goForward())
+ipcMain.on('browser:reload',  () => getActiveView()?.webContents.reload())
+
+ipcMain.handle('tab:create', (_, url) => {
+  const tabId = createBrowserTab(url || store.store?.homepage || 'https://www.youtube.com')
+  return tabId
+})
+
+ipcMain.on('tab:switch', (_, tabId) => {
+  switchBrowserTab(tabId)
+})
+
+ipcMain.on('tab:close', (_, tabId) => {
+  closeBrowserTab(tabId)
+})
 
 // ---------------------------------------------------------------------------
 // IPC — metadata fetch
@@ -323,14 +395,16 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
 // ---------------------------------------------------------------------------
 // IPC — audio extraction
 // ---------------------------------------------------------------------------
-ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title }) => {
+ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, filePrefix }) => {
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
   const audioQuality = settings.audioQuality || '320'
 
   fs.mkdirSync(saveFolder, { recursive: true })
-  const outputTemplate = path.join(saveFolder, '%(title)s.%(ext)s')
+  let template = '%(title)s.%(ext)s'
+  if (filePrefix) template = `${filePrefix} - ${template}`
+  const outputTemplate = path.join(saveFolder, template)
 
   const bin = findBinary('yt-dlp')
   const args = [
@@ -429,11 +503,12 @@ ipcMain.handle('playlist:fetch', async (_, playlistURL) => {
 // ---------------------------------------------------------------------------
 // IPC — download management
 // ---------------------------------------------------------------------------
-ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title }) => {
+ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix }) => {
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
-  const template = settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s'
+  let template = settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s'
+  if (filePrefix) template = `${filePrefix} - ${template}`
   const mergeFormat = settings.defaultFormat || 'mp4'
 
   fs.mkdirSync(saveFolder, { recursive: true })
