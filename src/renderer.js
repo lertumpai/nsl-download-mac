@@ -115,8 +115,6 @@ function bindIPCListeners() {
   window.api.on('tab:new-requested', async (url) => {
     const id = await window.api.createTab(url)
     browserTabsList.push({ id, url: url, title: 'Loading...', loading: true })
-    activeBrowserTabId = id
-    window.api.switchTab(id)
     renderBrowserTabs()
   })
 

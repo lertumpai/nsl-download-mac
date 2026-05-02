@@ -1,5 +1,5 @@
 {
-  "name": "lertumpai-downloader",
+  "name": "nsl-downloader",
   "version": "1.0.0",
   "description": "Video downloader browser — browse any site and download detected videos",
   "main": "main.js",
@@ -17,8 +17,8 @@
   },
   "build": {
     "appId": "com.lertumpai.downloader",
-    "productName": "lertumpai-downloader",
-    "copyright": "Copyright © 2026 lertumpai-downloader",
+    "productName": "NSL Downloader",
+    "copyright": "Copyright © 2026 NSL Downloader",
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
@@ -34,7 +34,7 @@
       ]
     },
     "dmg": {
-      "title": "lertumpai-downloader",
+      "title": "NSL Downloader",
       "window": { "width": 540, "height": 380 }
     },
     "files": [
