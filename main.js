@@ -99,8 +99,13 @@ function findBinary(name) {
 function normalizeVKUrl(url) {
   if (!url) return url
   try {
-    const u = new URL(url, 'https://vkvideo.ru')
-    if (u.hostname.endsWith('vkvideo.ru') || u.hostname.endsWith('vkvideo.com')) {
+    const u = new URL(url)
+    if (u.hostname.includes('vk.com') || u.hostname.includes('vkvideo.')) {
+      const zParam = u.searchParams.get('z')
+      if (zParam && zParam.startsWith('video')) {
+        const videoId = zParam.split('/')[0]
+        return `https://vk.com/${videoId}`
+      }
       const pathMatch = u.pathname.match(/video[-\d_]+/)
       if (pathMatch) return `https://vk.com/${pathMatch[0]}`
       const queryMatch = u.search.match(/video[-\d_]+/)
@@ -110,6 +115,19 @@ function normalizeVKUrl(url) {
     }
   } catch {}
   return url
+}
+
+function getTargetUrl(pageURL, streamUrl) {
+  let targetUrl = pageURL
+  const normalizedPage = normalizeVKUrl(pageURL)
+  
+  if (normalizedPage && normalizedPage.match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)) {
+    targetUrl = normalizedPage
+  } else if (streamUrl) {
+    targetUrl = streamUrl
+  }
+  
+  return normalizeVKUrl(targetUrl)
 }
 
 // ---------------------------------------------------------------------------
@@ -303,8 +321,16 @@ function recordDetection(pageURL, pageTitle, type, streamUrl = null) {
 
   const existing = detectedByPage.get(pageURL)
   if (existing) {
-    if (streamUrl && !existing.streamUrl && (type === 'HLS' || type === 'DASH' || type === 'Video')) {
-      existing.streamUrl = streamUrl
+    if (streamUrl && (type === 'HLS' || type === 'DASH' || type === 'Video')) {
+      if (!existing.streamUrl) {
+        existing.streamUrl = streamUrl
+      } else {
+        const newIsVK = normalizeVKUrl(streamUrl).match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)
+        const oldIsVK = normalizeVKUrl(existing.streamUrl).match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)
+        if (newIsVK && !oldIsVK) {
+          existing.streamUrl = streamUrl
+        }
+      }
     }
     if (existing.types.has(type)) return // already know this type for this page
     existing.types.add(type)
@@ -328,6 +354,19 @@ function recordDetection(pageURL, pageTitle, type, streamUrl = null) {
 async function scanDOMForVideos() {
   const view = getActiveView()
   if (!view) return
+
+  const pageURL = view.webContents.getURL()
+  const pageTitle = view.webContents.getTitle()
+
+  // Immediately detect if the page URL itself is a canonical video URL
+  const isYouTube = pageURL.includes('youtube.com/watch')
+  const isTwitter = pageURL.match(/^https?:\/\/(www\.)?(twitter|x)\.com\/.*\/status\/\d+/)
+  const isVK = normalizeVKUrl(pageURL).match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)
+
+  if (isYouTube) recordDetection(pageURL, pageTitle, 'YouTube', pageURL)
+  else if (isTwitter) recordDetection(pageURL, pageTitle, 'Twitter', pageURL)
+  else if (isVK) recordDetection(pageURL, pageTitle, 'Video', pageURL)
+
   try {
     const found = await view.webContents.executeJavaScript(`
       (function() {
@@ -357,8 +396,6 @@ async function scanDOMForVideos() {
         return Array.from(urls)
       })()
     `)
-    const pageURL = view.webContents.getURL()
-    const pageTitle = view.webContents.getTitle()
     for (const src of found) {
       const type = classifyRequest(src, '')
       recordDetection(pageURL, pageTitle, type || 'Video', src)
@@ -430,8 +467,7 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
   return new Promise((resolve, reject) => {
     const bin = findBinary('yt-dlp')
     const pageData = detectedByPage.get(pageURL)
-    let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
-    targetUrl = normalizeVKUrl(targetUrl)
+    const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
     const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
     if (targetUrl !== pageURL) {
@@ -471,8 +507,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
-  let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
-  targetUrl = normalizeVKUrl(targetUrl)
+  const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
   const bin = findBinary('yt-dlp')
   const args = [
@@ -587,8 +622,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
-  let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
-  targetUrl = normalizeVKUrl(targetUrl)
+  const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
   const bin = findBinary('yt-dlp')
   const args = [
