@@ -3,7 +3,7 @@ const {
   session, shell, dialog, Notification, nativeTheme
 } = require('electron')
 const path = require('path')
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
 const fs = require('fs')
 const os = require('os')
 
@@ -71,20 +71,45 @@ let downloadIdCounter = 0
 // yt-dlp / ffmpeg binary resolution
 // ---------------------------------------------------------------------------
 function findBinary(name) {
-  // 1. Bundled inside app (production)
+  // 0. Explicit override from environment
+  if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) return process.env.YTDLP_PATH
+
+  // 1. Prefer a PATH-installed binary if available
+  try {
+    const whichResult = spawnSync('which', [name], { encoding: 'utf8' }).stdout.trim()
+    if (whichResult && fs.existsSync(whichResult)) return whichResult
+  } catch {}
+
+  // 2. Bundled inside app (production)
   const inResources = path.join(process.resourcesPath || '', 'bin', name)
   if (fs.existsSync(inResources)) return inResources
 
-  // 2. Alongside this file (development: put yt-dlp/ffmpeg in ./bin/)
+  // 3. Alongside this file (development: put yt-dlp/ffmpeg in ./bin/)
   const localBin = path.join(__dirname, 'bin', name)
   if (fs.existsSync(localBin)) return localBin
 
-  // 3. Homebrew
+  // 4. Homebrew / system paths
   for (const p of [`/opt/homebrew/bin/${name}`, `/usr/local/bin/${name}`, `/usr/bin/${name}`]) {
     if (fs.existsSync(p)) return p
   }
 
   return name // hope it's in PATH
+}
+
+function normalizeVKUrl(url) {
+  if (!url) return url
+  try {
+    const u = new URL(url, 'https://vkvideo.ru')
+    if (u.hostname.endsWith('vkvideo.ru') || u.hostname.endsWith('vkvideo.com')) {
+      const pathMatch = u.pathname.match(/video[-\d_]+/)
+      if (pathMatch) return `https://vk.com/${pathMatch[0]}`
+      const queryMatch = u.search.match(/video[-\d_]+/)
+      if (queryMatch) return `https://vk.com/${queryMatch[0]}`
+      const hashMatch = u.hash.match(/video[-\d_]+/)
+      if (hashMatch) return `https://vk.com/${hashMatch[0]}`
+    }
+  } catch {}
+  return url
 }
 
 // ---------------------------------------------------------------------------
@@ -307,10 +332,28 @@ async function scanDOMForVideos() {
     const found = await view.webContents.executeJavaScript(`
       (function() {
         const urls = new Set()
-        document.querySelectorAll('video, source, iframe, a').forEach(el => {
-          const src = el.src || el.currentSrc || el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('data-src')
+        document.querySelectorAll('video, source, iframe, a, [data-src], [data-href]').forEach(el => {
+          const src = el.src || el.currentSrc || el.getAttribute('src') || el.getAttribute('href') || el.getAttribute('data-src') || el.getAttribute('data-href')
           if (src && src.startsWith('http')) urls.add(src)
         })
+
+        const vkRegex = /(https?:)?\/\/(?:m\.)?vk\.com\/(?:video[-\d_]+|video_ext\.php\?)[^"'\s]+/g
+        document.querySelectorAll('script').forEach(script => {
+          const text = script.textContent || ''
+          let match
+          while ((match = vkRegex.exec(text))) {
+            let url = match[0]
+            if (url.startsWith('//')) url = 'https:' + url
+            urls.add(url)
+          }
+        })
+
+        const vkVideoPageRegex = /(https?:)?\/\/(?:www\.)?vkvideo\.ru\/video[-\d_]+/g
+        document.body.innerHTML.match(vkVideoPageRegex || [])?.forEach(url => {
+          if (url.startsWith('//')) url = 'https:' + url
+          urls.add(url)
+        })
+
         return Array.from(urls)
       })()
     `)
@@ -387,7 +430,8 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
   return new Promise((resolve, reject) => {
     const bin = findBinary('yt-dlp')
     const pageData = detectedByPage.get(pageURL)
-    const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+    let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+    targetUrl = normalizeVKUrl(targetUrl)
 
     const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
     if (targetUrl !== pageURL) {
@@ -427,7 +471,8 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
-  const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+  let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+  targetUrl = normalizeVKUrl(targetUrl)
 
   const bin = findBinary('yt-dlp')
   const args = [
@@ -542,7 +587,8 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
-  const targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+  let targetUrl = pageData && pageData.streamUrl ? pageData.streamUrl : pageURL
+  targetUrl = normalizeVKUrl(targetUrl)
 
   const bin = findBinary('yt-dlp')
   const args = [

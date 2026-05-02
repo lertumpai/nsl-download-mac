@@ -1,4 +1,4 @@
-# NSL Download
+# lertumpai-downloader
 
 A desktop browser that automatically detects and downloads videos from any website. Browse to YouTube, Facebook, VK, TikTok, or any site — the app intercepts video streams in the background and shows a **Download** button in the sidebar. No URL copying needed. Login to private content works normally inside the embedded browser.
 
