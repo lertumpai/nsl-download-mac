@@ -124,6 +124,7 @@ function prependDetectedCard(entry) {
         <div class="video-title" title="${esc(entry.pageTitle)}">${esc(entry.pageTitle || host)}</div>
         <div class="video-url">${esc(host)}</div>
       </div>
+      <button class="icon-btn btn-dismiss" title="Dismiss">✕</button>
     </div>
     <div class="type-badges"></div>
     <div class="video-card-actions">
@@ -133,6 +134,14 @@ function prependDetectedCard(entry) {
   `
 
   renderBadges(card.querySelector('.type-badges'), entry.types)
+
+  card.querySelector('.btn-dismiss').addEventListener('click', () => {
+    detectedPages.delete(entry.pageURL)
+    card.remove()
+    if (!$('detected-list').hasChildNodes()) {
+      $('detected-empty').style.display = ''
+    }
+  })
 
   card.querySelector('.btn-download').addEventListener('click', () =>
     toggleQualityPicker(card, entry.pageURL, entry.pageTitle))
