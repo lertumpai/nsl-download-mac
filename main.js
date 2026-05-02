@@ -516,60 +516,74 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
   const bin = findBinary('yt-dlp')
-  const args = [
-    '-f', 'bestaudio',
-    '-x',
-    '--audio-format', audioFormat || 'mp3',
-    '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
-    '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
-    '--output', outputTemplate,
-    '--newline',
-    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-  ]
-  if (targetUrl !== pageURL) {
-    args.push('--add-header', `Referer: ${pageURL}`)
-    try { args.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
-  }
-  args.push(targetUrl)
 
-  const proc = spawn(bin, args)
-  activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
+  function buildAudioArgs(outTpl) {
+    const a = [
+      '-f', 'bestaudio',
+      '-x',
+      '--audio-format', audioFormat || 'mp3',
+      '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
+      '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
+      '--output', outTpl,
+      '--newline', '--no-overwrites',
+      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+    ]
+    if (targetUrl !== pageURL) {
+      a.push('--add-header', `Referer: ${pageURL}`)
+      try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
+    }
+    a.push(targetUrl)
+    return a
+  }
+
   let capturedFilePath = ''
 
-  proc.stdout.on('data', data => {
-    for (const line of data.toString().split('\n')) {
-      const fp = parseFilePath(line)
-      if (fp) capturedFilePath = fp
-      const p = parseYTDLPLine(line, true)
-      if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
-    }
-  })
+  function runAudio(outTpl, isRetry) {
+    const proc = spawn(bin, buildAudioArgs(outTpl))
+    activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
+    let skipped = false
 
-  proc.stderr.on('data', data => {
-    const msg = data.toString().trim()
-    if (msg) mainWindow?.webContents.send('download:log', { id, msg })
-  })
+    proc.stdout.on('data', data => {
+      for (const line of data.toString().split('\n')) {
+        if (line.includes('has already been downloaded')) skipped = true
+        const fp = parseFilePath(line)
+        if (fp) capturedFilePath = fp
+        const p = parseYTDLPLine(line, true)
+        if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
+      }
+    })
 
-  proc.on('close', code => {
-    activeDownloads.delete(id)
-    if (code === 0) {
-      mainWindow?.webContents.send('download:done', { id, isAudio: true, filePath: capturedFilePath })
-      try {
-        new Notification({
-          title: 'Audio Extraction Complete',
-          body: title || 'Your audio file is ready.'
-        }).show()
-      } catch {}
-    } else {
-      mainWindow?.webContents.send('download:failed', { id, code })
-    }
-  })
+    proc.stderr.on('data', data => {
+      const msg = data.toString().trim()
+      if (msg) mainWindow?.webContents.send('download:log', { id, msg })
+    })
 
-  proc.on('error', err => {
-    activeDownloads.delete(id)
-    mainWindow?.webContents.send('download:failed', { id, error: err.message })
-  })
+    proc.on('close', code => {
+      activeDownloads.delete(id)
+      if (code === 0 && skipped && !isRetry) {
+        const epochTpl = outTpl.includes('.%(ext)s')
+          ? outTpl.replace('.%(ext)s', `_${Date.now()}.%(ext)s`)
+          : `${outTpl}_${Date.now()}`
+        runAudio(epochTpl, true)
+        return
+      }
+      if (code === 0) {
+        mainWindow?.webContents.send('download:done', { id, isAudio: true, filePath: capturedFilePath })
+        try {
+          new Notification({ title: 'Audio Extraction Complete', body: title || 'Your audio file is ready.' }).show()
+        } catch {}
+      } else {
+        mainWindow?.webContents.send('download:failed', { id, code })
+      }
+    })
 
+    proc.on('error', err => {
+      activeDownloads.delete(id)
+      mainWindow?.webContents.send('download:failed', { id, error: err.message })
+    })
+  }
+
+  runAudio(outputTemplate, false)
   return id
 })
 
@@ -632,58 +646,73 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
   const bin = findBinary('yt-dlp')
-  const args = [
-    '--format', formatSelector,
-    '--merge-output-format', mergeFormat,
-    '--output', outputTemplate,
-    '--newline', '--no-playlist', '--progress',
-    '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
-    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
-  ]
-  if (targetUrl !== pageURL) {
-    args.push('--add-header', `Referer: ${pageURL}`)
-    try { args.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
-  }
-  args.push(targetUrl)
 
-  const proc = spawn(bin, args)
-  activeDownloads.set(id, { proc, pageURL, title })
+  function buildArgs(outTpl) {
+    const a = [
+      '--format', formatSelector,
+      '--merge-output-format', mergeFormat,
+      '--output', outTpl,
+      '--newline', '--no-playlist', '--progress', '--no-overwrites',
+      '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
+      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+    ]
+    if (targetUrl !== pageURL) {
+      a.push('--add-header', `Referer: ${pageURL}`)
+      try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
+    }
+    a.push(targetUrl)
+    return a
+  }
+
   let capturedFilePath = ''
 
-  proc.stdout.on('data', data => {
-    for (const line of data.toString().split('\n')) {
-      const fp = parseFilePath(line)
-      if (fp) capturedFilePath = fp
-      const p = parseYTDLPLine(line)
-      if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
-    }
-  })
+  function run(outTpl, isRetry) {
+    const proc = spawn(bin, buildArgs(outTpl))
+    activeDownloads.set(id, { proc, pageURL, title })
+    let skipped = false
 
-  proc.stderr.on('data', data => {
-    const msg = data.toString().trim()
-    if (msg) mainWindow?.webContents.send('download:log', { id, msg })
-  })
+    proc.stdout.on('data', data => {
+      for (const line of data.toString().split('\n')) {
+        if (line.includes('has already been downloaded')) skipped = true
+        const fp = parseFilePath(line)
+        if (fp) capturedFilePath = fp
+        const p = parseYTDLPLine(line)
+        if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
+      }
+    })
 
-  proc.on('close', code => {
-    activeDownloads.delete(id)
-    if (code === 0) {
-      mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
-      try {
-        new Notification({
-          title: 'Download Complete',
-          body: title || 'Your video is ready.'
-        }).show()
-      } catch {}
-    } else {
-      mainWindow?.webContents.send('download:failed', { id, code })
-    }
-  })
+    proc.stderr.on('data', data => {
+      const msg = data.toString().trim()
+      if (msg) mainWindow?.webContents.send('download:log', { id, msg })
+    })
 
-  proc.on('error', err => {
-    activeDownloads.delete(id)
-    mainWindow?.webContents.send('download:failed', { id, error: err.message })
-  })
+    proc.on('close', code => {
+      activeDownloads.delete(id)
+      if (code === 0 && skipped && !isRetry) {
+        // File already existed — retry with Unix epoch suffix before the extension
+        const epochTpl = outTpl.includes('.%(ext)s')
+          ? outTpl.replace('.%(ext)s', `_${Date.now()}.%(ext)s`)
+          : `${outTpl}_${Date.now()}`
+        run(epochTpl, true)
+        return
+      }
+      if (code === 0) {
+        mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
+        try {
+          new Notification({ title: 'Download Complete', body: title || 'Your video is ready.' }).show()
+        } catch {}
+      } else {
+        mainWindow?.webContents.send('download:failed', { id, code })
+      }
+    })
 
+    proc.on('error', err => {
+      activeDownloads.delete(id)
+      mainWindow?.webContents.send('download:failed', { id, error: err.message })
+    })
+  }
+
+  run(outputTemplate, false)
   return id
 })
 
