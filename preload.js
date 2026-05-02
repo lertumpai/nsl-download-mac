@@ -10,9 +10,13 @@ contextBridge.exposeInMainWorld('api', {
   // yt-dlp
   fetchMetadata: (url)  => ipcRenderer.invoke('ytdlp:metadata', url),
   startDownload: (opts) => ipcRenderer.invoke('ytdlp:download', opts),
+  extractAudio:  (opts) => ipcRenderer.invoke('ytdlp:extractAudio', opts),
   cancelDownload: (id)  => ipcRenderer.send('ytdlp:cancel', id),
   pauseDownload:  (id)  => ipcRenderer.send('ytdlp:pause', id),
   resumeDownload: (id)  => ipcRenderer.send('ytdlp:resume', id),
+
+  // Playlist
+  fetchPlaylist: (url) => ipcRenderer.invoke('playlist:fetch', url),
 
   // File system
   openFile:    (p) => ipcRenderer.send('shell:openFile', p),

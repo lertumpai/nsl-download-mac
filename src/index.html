@@ -115,6 +115,25 @@
           <label class="setting-label">HOMEPAGE</label>
           <input class="setting-input" id="s-homepage" type="text">
         </div>
+
+        <div class="settings-section-title">AUDIO</div>
+        <div class="setting-row">
+          <label class="setting-label">DEFAULT AUDIO FORMAT</label>
+          <select class="setting-input" id="s-audio-format">
+            <option value="mp3" selected>MP3</option>
+            <option value="aac">AAC</option>
+            <option value="flac">FLAC</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">MP3 QUALITY (kbps)</label>
+          <select class="setting-input" id="s-audio-quality">
+            <option value="128">128k</option>
+            <option value="192">192k</option>
+            <option value="320" selected>320k (best)</option>
+            <option value="0">VBR best</option>
+          </select>
+        </div>
       </div>
     </div>
 

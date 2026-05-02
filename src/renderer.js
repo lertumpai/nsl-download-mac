@@ -6,6 +6,10 @@ const completed     = []
 let settings = {}
 let activeQualityPicker = null   // pageURL currently showing quality picker
 
+// Playlist state
+let currentPlaylist = null        // { url, listId, title, entries[] }
+let playlistView    = false        // true = showing playlist panel
+
 // ── Boot ─────────────────────────────────────────────────────────
 ;(async () => {
   settings = await window.api.getSettings()
@@ -55,10 +59,27 @@ function bindIPCListeners() {
 
   window.api.on('video:detected', ({ pageURL, pageTitle, types }) => {
     upsertDetectedVideo(pageURL, pageTitle, types)
-    // Auto-switch to Detected tab if something new arrives
     if (!document.querySelector('.tab-btn[data-tab="detected"]').classList.contains('active')) {
       flashTab('detected')
     }
+  })
+
+  window.api.on('playlist:detected', ({ url, listId }) => {
+    upsertPlaylistCard(url, listId)
+    if (!document.querySelector('.tab-btn[data-tab="detected"]').classList.contains('active')) {
+      flashTab('detected')
+    }
+  })
+
+  window.api.on('playlist:entry', (entry) => {
+    if (!currentPlaylist) return
+    currentPlaylist.entries.push(entry)
+    appendPlaylistEntry(entry)
+  })
+
+  window.api.on('playlist:done', ({ count }) => {
+    const hdr = $('playlist-loading')
+    if (hdr) hdr.textContent = `${count} video${count !== 1 ? 's' : ''} found`
   })
 
   window.api.on('download:progress', ({ id, status, percent, speed, eta, total }) => {
@@ -72,10 +93,10 @@ function bindIPCListeners() {
     renderDownloadItem(id)
   })
 
-  window.api.on('download:done', ({ id }) => {
+  window.api.on('download:done', ({ id, isAudio }) => {
     const dl = downloads.get(id)
     if (!dl) return
-    completed.unshift({ id, title: dl.title, filePath: dl.filePath })
+    completed.unshift({ id, title: dl.title, filePath: dl.filePath, isAudio: isAudio || dl.isAudio })
     downloads.delete(id)
     renderQueued()
     renderCompleted()
@@ -214,6 +235,7 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
 
 function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
   const defFormat = settings.defaultFormat || 'mp4'
+  const defAudioFormat = settings.defaultAudioFormat || 'mp3'
 
   picker.innerHTML = `
     <div class="quality-picker-header">
@@ -228,6 +250,15 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
         <option value="webm" ${defFormat==='webm'?'selected':''}>WebM</option>
       </select>
       <button class="btn btn-primary" style="flex:1" id="btn-start-dl">↓ Download</button>
+    </div>
+    <div class="quality-picker-divider"></div>
+    <div class="quality-picker-footer">
+      <select class="format-select" id="out-audio-format">
+        <option value="mp3" ${defAudioFormat==='mp3'?'selected':''}>MP3</option>
+        <option value="aac" ${defAudioFormat==='aac'?'selected':''}>AAC</option>
+        <option value="flac" ${defAudioFormat==='flac'?'selected':''}>FLAC</option>
+      </select>
+      <button class="btn btn-audio" style="flex:1" id="btn-extract-audio">♪ Extract</button>
     </div>
   `
 
@@ -257,13 +288,199 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
     const fmt = formats[selectedIdx]
     const outFmt = picker.querySelector('#out-format').value
     const selector = buildFormatSelector(fmt)
-
     picker.remove()
     activeQualityPicker = null
-
     await startDownload({ pageURL, title, formatSelector: selector, outputFormat: outFmt })
     switchTab('queue')
   })
+
+  picker.querySelector('#btn-extract-audio').addEventListener('click', async () => {
+    const audioFmt = picker.querySelector('#out-audio-format').value
+    picker.remove()
+    activeQualityPicker = null
+    await extractAudioFromPage({ pageURL, title, audioFormat: audioFmt })
+    switchTab('queue')
+  })
+}
+
+// ── Audio extraction ──────────────────────────────────────────────
+async function extractAudioFromPage({ pageURL, title, audioFormat }) {
+  const id = await window.api.extractAudio({
+    pageURL, audioFormat: audioFormat || settings.defaultAudioFormat || 'mp3', title
+  })
+  downloads.set(id, {
+    id, pageURL, title,
+    status: 'downloading', percent: 0,
+    speed: '', eta: '', total: '', error: '',
+    isAudio: true
+  })
+  $('queue-empty').style.display = 'none'
+  renderDownloadItem(id)
+}
+
+// ── Playlist ──────────────────────────────────────────────────────
+function upsertPlaylistCard(url, listId) {
+  const existing = document.querySelector(`[data-playlist-url="${CSS.escape(url)}"]`)
+  if (existing) return
+
+  const list = $('detected-list')
+  if (!list) return
+  const card = document.createElement('div')
+  card.className = 'video-card playlist-card'
+  card.dataset.playlistUrl = url
+
+  const host = safeHost(url)
+  card.innerHTML = `
+    <div class="video-card-header">
+      <span class="playlist-icon">📋</span>
+      <div class="video-info">
+        <div class="video-title">YouTube Playlist</div>
+        <div class="video-url">${esc(host)}</div>
+      </div>
+      <button class="icon-btn btn-dismiss" title="Dismiss">✕</button>
+    </div>
+    <div class="video-card-actions">
+      <button class="btn btn-primary btn-browse-playlist">▸ Browse Playlist</button>
+    </div>
+  `
+
+  card.querySelector('.btn-dismiss').addEventListener('click', () => {
+    card.remove()
+    if (!$('detected-list').hasChildNodes()) $('detected-empty').style.display = ''
+  })
+
+  card.querySelector('.btn-browse-playlist').addEventListener('click', () =>
+    showPlaylistPanel(url))
+
+  list.prepend(card)
+  $('detected-empty').style.display = 'none'
+}
+
+function showPlaylistPanel(url) {
+  currentPlaylist = { url, entries: [] }
+  playlistView = true
+
+  const panel = $('panel-detected')
+  panel.innerHTML = `
+    <div class="playlist-panel">
+      <div class="playlist-panel-header">
+        <button class="icon-btn" id="btn-playlist-back">← Back</button>
+        <span class="playlist-panel-title" id="playlist-title">Loading…</span>
+      </div>
+      <div class="playlist-select-all-row">
+        <label><input type="checkbox" id="chk-select-all" checked> Select All</label>
+        <span class="playlist-count" id="playlist-loading">Fetching…</span>
+      </div>
+      <div id="playlist-entry-list" class="playlist-entry-list"></div>
+      <div class="playlist-panel-footer">
+        <div class="playlist-footer-row">
+          <label class="setting-label">Quality</label>
+          <select class="format-select" id="pl-quality">
+            <option value="2160">4K</option>
+            <option value="1080" selected>1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="360">360p</option>
+          </select>
+        </div>
+        <div class="playlist-footer-row">
+          <label class="setting-label">Format</label>
+          <select class="format-select" id="pl-format">
+            <option value="mp4" selected>MP4</option>
+            <option value="mkv">MKV</option>
+            <option value="webm">WebM</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="btn-dl-selected" style="margin-top:6px">↓ Download Selected</button>
+      </div>
+    </div>
+  `
+
+  $('btn-playlist-back').addEventListener('click', () => {
+    playlistView = false
+    currentPlaylist = null
+    panel.innerHTML = `
+      <div class="empty-state" id="detected-empty" style="display:${detectedPages.size ? 'none' : ''}">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>
+        </svg>
+        <p>Browse to any page.<br>Detected videos appear here.</p>
+      </div>
+      <div id="detected-list"></div>
+    `
+    for (const [, entry] of detectedPages) prependDetectedCard(entry)
+  })
+
+  $('chk-select-all').addEventListener('change', e => {
+    document.querySelectorAll('.pl-entry-chk').forEach(chk => { chk.checked = e.target.checked })
+    updateDownloadSelectedLabel()
+  })
+
+  $('btn-dl-selected').addEventListener('click', () => downloadSelectedPlaylistItems())
+
+  window.api.fetchPlaylist(url).then(({ count }) => {
+    const el = $('playlist-title')
+    if (el) el.textContent = `${count} video${count !== 1 ? 's' : ''}`
+  }).catch(() => {
+    const el = $('playlist-loading')
+    if (el) el.textContent = '⚠ Failed to fetch'
+  })
+}
+
+function appendPlaylistEntry(entry) {
+  const list = $('playlist-entry-list')
+  if (!list) return
+  const idx = currentPlaylist ? currentPlaylist.entries.length : 0
+  const row = document.createElement('label')
+  row.className = 'pl-entry-row'
+  row.dataset.entryUrl = entry.url
+  const dur = entry.duration ? formatDuration(entry.duration) : ''
+  row.innerHTML = `
+    <input type="checkbox" class="pl-entry-chk" checked>
+    <span class="pl-entry-index">${idx}.</span>
+    <span class="pl-entry-title" title="${esc(entry.title)}">${esc(entry.title)}</span>
+    ${dur ? `<span class="pl-entry-dur">${esc(dur)}</span>` : ''}
+  `
+  row.querySelector('.pl-entry-chk').addEventListener('change', updateDownloadSelectedLabel)
+  list.appendChild(row)
+  updateDownloadSelectedLabel()
+}
+
+function updateDownloadSelectedLabel() {
+  const total   = document.querySelectorAll('.pl-entry-chk').length
+  const checked = document.querySelectorAll('.pl-entry-chk:checked').length
+  const btn = $('btn-dl-selected')
+  if (btn) btn.textContent = checked > 0 ? `↓ Download ${checked} selected` : '↓ Download Selected'
+  const allChk = $('chk-select-all')
+  if (allChk) allChk.indeterminate = checked > 0 && checked < total
+}
+
+async function downloadSelectedPlaylistItems() {
+  if (!currentPlaylist) return
+  const quality = $('pl-quality')?.value || '1080'
+  const format  = $('pl-format')?.value  || 'mp4'
+  const formatSelector = `bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
+
+  const rows = document.querySelectorAll('.pl-entry-row')
+  let count = 0
+  for (const row of rows) {
+    const chk = row.querySelector('.pl-entry-chk')
+    if (!chk?.checked) continue
+    const url   = row.dataset.entryUrl
+    const title = row.querySelector('.pl-entry-title')?.textContent || 'Video'
+    await startDownload({ pageURL: url, title, formatSelector, outputFormat: format })
+    count++
+  }
+  if (count > 0) switchTab('queue')
+}
+
+function formatDuration(secs) {
+  if (!secs) return ''
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = Math.floor(secs % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+  return `${m}:${String(s).padStart(2,'0')}`
 }
 
 // ── Download management ───────────────────────────────────────────
@@ -296,7 +513,8 @@ function renderDownloadItem(id) {
     list.appendChild(item)
   }
 
-  const isMuxing = dl.status === 'muxing'
+  const isMuxing     = dl.status === 'muxing'
+  const isExtracting = dl.status === 'extracting'
   const isFailed = dl.status === 'failed'
   const pct = dl.percent || 0
 
@@ -307,7 +525,7 @@ function renderDownloadItem(id) {
            style="width:${pct}%"></div>
     </div>
     <div class="download-meta">
-      <span>${isFailed ? '⚠ ' + esc(dl.error) : isMuxing ? 'Merging…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
+      <span>${isFailed ? '⚠ ' + esc(dl.error) : isExtracting ? 'Extracting audio…' : isMuxing ? 'Merging…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
       <span>${dl.speed ? dl.speed + (dl.eta ? ' · ETA ' + dl.eta : '') : ''}</span>
     </div>
     <div class="download-actions">
@@ -343,14 +561,13 @@ function renderCompleted() {
   const list = $('done-list')
   $('done-empty').style.display = completed.length ? 'none' : ''
 
-  // Prepend new item (completed[0] is newest)
   const newest = completed[0]
   if (!list.querySelector(`[data-done-id="${newest.id}"]`)) {
     const item = document.createElement('div')
     item.className = 'completed-item'
     item.dataset.doneId = newest.id
     item.innerHTML = `
-      <span class="completed-icon">✅</span>
+      <span class="completed-icon">${newest.isAudio ? '♪' : '✅'}</span>
       <span class="completed-title" title="${esc(newest.title)}">${esc(newest.title)}</span>
       <div class="completed-actions">
         <button class="link-btn" data-action="open">Open</button>
@@ -377,12 +594,14 @@ function updateQueueEmpty() {
 
 // ── Settings form ─────────────────────────────────────────────────
 function applySettingsToForm() {
-  setVal('s-quality',     settings.defaultQuality || '1080p')
-  setVal('s-format',      settings.defaultFormat  || 'mp4')
-  setVal('s-folder',      settings.saveFolder     || '')
-  setVal('s-template',    settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s')
-  setVal('s-concurrency', String(settings.maxConcurrentDownloads || 3))
-  setVal('s-homepage',    settings.homepage || 'https://www.youtube.com')
+  setVal('s-quality',       settings.defaultQuality || '1080p')
+  setVal('s-format',        settings.defaultFormat  || 'mp4')
+  setVal('s-folder',        settings.saveFolder     || '')
+  setVal('s-template',      settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s')
+  setVal('s-concurrency',   String(settings.maxConcurrentDownloads || 3))
+  setVal('s-homepage',      settings.homepage || 'https://www.youtube.com')
+  setVal('s-audio-format',  settings.defaultAudioFormat || 'mp3')
+  setVal('s-audio-quality', settings.audioQuality || '320')
 }
 
 function bindSettingsForm() {
@@ -399,6 +618,8 @@ function bindSettingsForm() {
   save('filenameTemplate',      's-template')
   save('maxConcurrentDownloads','s-concurrency', v => parseInt(v, 10))
   save('homepage',              's-homepage')
+  save('defaultAudioFormat',    's-audio-format')
+  save('audioQuality',          's-audio-quality')
 
   $('btn-choose-folder')?.addEventListener('click', async () => {
     const folder = await window.api.chooseFolder()

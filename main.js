@@ -21,7 +21,9 @@ try {
       filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
       maxConcurrentDownloads: 3,
       homepage: 'https://www.youtube.com',
-      windowBounds: { width: 1300, height: 820 }
+      windowBounds: { width: 1300, height: 820 },
+      defaultAudioFormat: 'mp3',
+      audioQuality: '320'
     }
   })
 } catch {
@@ -33,7 +35,9 @@ try {
     filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
     maxConcurrentDownloads: 3,
     homepage: 'https://www.youtube.com',
-    windowBounds: { width: 1300, height: 820 }
+    windowBounds: { width: 1300, height: 820 },
+    defaultAudioFormat: 'mp3',
+    audioQuality: '320'
   }
   let data = { ...defaults }
   try { Object.assign(data, JSON.parse(fs.readFileSync(settingsPath, 'utf8'))) } catch {}
@@ -129,9 +133,11 @@ function createWindow() {
   browserView.webContents.on('did-navigate', (_, url) => {
     mainWindow.webContents.send('browser:navigate', url, browserView.webContents.getTitle())
     scanDOMForVideos()
+    checkForPlaylist(url)
   })
   browserView.webContents.on('did-navigate-in-page', (_, url) => {
     mainWindow.webContents.send('browser:navigate', url, browserView.webContents.getTitle())
+    checkForPlaylist(url)
   })
   browserView.webContents.on('page-title-updated', (_, title) => {
     mainWindow.webContents.send('browser:title', title)
@@ -250,6 +256,25 @@ async function scanDOMForVideos() {
 }
 
 // ---------------------------------------------------------------------------
+// Playlist detection
+// ---------------------------------------------------------------------------
+function checkForPlaylist(url) {
+  if (!url || !mainWindow) return
+  const isPlaylist = url.includes('youtube.com/playlist?list=') ||
+    (url.includes('youtube.com/watch') && url.includes('list='))
+  if (!isPlaylist) return
+
+  // Extract playlist ID and basic info
+  let listId = ''
+  try {
+    const u = new URL(url)
+    listId = u.searchParams.get('list') || ''
+  } catch {}
+
+  mainWindow.webContents.send('playlist:detected', { url, listId })
+}
+
+// ---------------------------------------------------------------------------
 // IPC — browser navigation
 // ---------------------------------------------------------------------------
 ipcMain.on('browser:go', (_, input) => {
@@ -291,6 +316,109 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
       try { resolve(JSON.parse(line)) }
       catch (e) { reject(new Error('Failed to parse yt-dlp JSON')) }
     })
+    proc.on('error', reject)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// IPC — audio extraction
+// ---------------------------------------------------------------------------
+ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title }) => {
+  const id = String(++downloadIdCounter)
+  const settings = store.store || {}
+  const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
+  const audioQuality = settings.audioQuality || '320'
+
+  fs.mkdirSync(saveFolder, { recursive: true })
+  const outputTemplate = path.join(saveFolder, '%(title)s.%(ext)s')
+
+  const bin = findBinary('yt-dlp')
+  const args = [
+    '-f', 'bestaudio',
+    '-x',
+    '--audio-format', audioFormat || 'mp3',
+    '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
+    '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
+    '--output', outputTemplate,
+    '--newline',
+    pageURL
+  ]
+
+  const proc = spawn(bin, args)
+  activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
+
+  proc.stdout.on('data', data => {
+    for (const line of data.toString().split('\n')) {
+      const p = parseYTDLPLine(line, true)
+      if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
+    }
+  })
+
+  proc.stderr.on('data', data => {
+    const msg = data.toString().trim()
+    if (msg) mainWindow?.webContents.send('download:log', { id, msg })
+  })
+
+  proc.on('close', code => {
+    activeDownloads.delete(id)
+    if (code === 0) {
+      mainWindow?.webContents.send('download:done', { id, isAudio: true })
+      try {
+        new Notification({
+          title: 'Audio Extraction Complete',
+          body: title || 'Your audio file is ready.'
+        }).show()
+      } catch {}
+    } else {
+      mainWindow?.webContents.send('download:failed', { id, code })
+    }
+  })
+
+  proc.on('error', err => {
+    activeDownloads.delete(id)
+    mainWindow?.webContents.send('download:failed', { id, error: err.message })
+  })
+
+  return id
+})
+
+// ---------------------------------------------------------------------------
+// IPC — playlist fetch
+// ---------------------------------------------------------------------------
+ipcMain.handle('playlist:fetch', async (_, playlistURL) => {
+  return new Promise((resolve, reject) => {
+    const bin = findBinary('yt-dlp')
+    const args = ['--flat-playlist', '--dump-json', '--no-warnings', playlistURL]
+    const proc = spawn(bin, args)
+    let count = 0
+
+    proc.stdout.on('data', data => {
+      const lines = data.toString().split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith('{')) continue
+        try {
+          const entry = JSON.parse(trimmed)
+          count++
+          mainWindow?.webContents.send('playlist:entry', {
+            id: entry.id,
+            title: entry.title || `Video ${count}`,
+            url: entry.url || entry.webpage_url || `https://www.youtube.com/watch?v=${entry.id}`,
+            duration: entry.duration,
+            thumbnail: entry.thumbnail,
+            uploader: entry.uploader || entry.channel
+          })
+        } catch {}
+      }
+    })
+
+    proc.stderr.on('data', () => {}) // suppress warnings
+
+    proc.on('close', code => {
+      mainWindow?.webContents.send('playlist:done', { count })
+      resolve({ count })
+    })
+
     proc.on('error', reject)
   })
 })
@@ -390,16 +518,18 @@ ipcMain.handle('settings:get', () => store.store || {
   saveFolder: store.get('saveFolder'),
   filenameTemplate: store.get('filenameTemplate'),
   maxConcurrentDownloads: store.get('maxConcurrentDownloads'),
-  homepage: store.get('homepage')
+  homepage: store.get('homepage'),
+  defaultAudioFormat: store.get('defaultAudioFormat'),
+  audioQuality: store.get('audioQuality')
 })
 ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
 
 // ---------------------------------------------------------------------------
 // Progress line parser
 // ---------------------------------------------------------------------------
-function parseYTDLPLine(line) {
+function parseYTDLPLine(line, isAudio = false) {
   if (line.includes('[ffmpeg]') || line.includes('[Merger]') || line.includes('Merging formats')) {
-    return { status: 'muxing', percent: 100, speed: '', eta: '' }
+    return { status: isAudio ? 'extracting' : 'muxing', percent: 100, speed: '', eta: '' }
   }
   if (!line.includes('[download]') || !line.includes('%')) return null
 
