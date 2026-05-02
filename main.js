@@ -97,6 +97,37 @@ function findBinary(name) {
   return name // hope it's in PATH
 }
 
+// ---------------------------------------------------------------------------
+// Download speed helpers
+// ---------------------------------------------------------------------------
+let _aria2cPath = undefined
+function findAria2c() {
+  if (_aria2cPath !== undefined) return _aria2cPath
+  try {
+    const r = spawnSync('which', ['aria2c'], { encoding: 'utf8' })
+    if (r.status === 0 && r.stdout.trim()) { _aria2cPath = r.stdout.trim(); return _aria2cPath }
+  } catch {}
+  for (const p of ['/opt/homebrew/bin/aria2c', '/usr/local/bin/aria2c', '/usr/bin/aria2c']) {
+    if (fs.existsSync(p)) { _aria2cPath = p; return _aria2cPath }
+  }
+  _aria2cPath = ''
+  return _aria2cPath
+}
+
+function getDownloadSpeedArgs() {
+  const args = [
+    '--concurrent-fragments', '4', // parallel HLS/DASH segments
+    '--retries', '10',
+    '--fragment-retries', '10',
+    '--buffer-size', '16M',
+  ]
+  if (findAria2c()) {
+    // 16 parallel HTTP connections for direct video files (mp4, webm, etc.)
+    args.push('--downloader', 'aria2c', '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M')
+  }
+  return args
+}
+
 function normalizeVKUrl(url) {
   if (!url) return url
   try {
@@ -735,7 +766,8 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
       '--output', outTpl,
       '--newline', '--no-overwrites',
-      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      ...getDownloadSpeedArgs()
     ]
     if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
@@ -866,7 +898,8 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
       '--output', outTpl,
       '--newline', '--no-playlist', '--progress', '--no-overwrites',
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
-      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      ...getDownloadSpeedArgs()
     ]
     if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {

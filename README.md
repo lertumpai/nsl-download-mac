@@ -32,6 +32,7 @@ git clone <repo-url>
 cd nsl-download-mac
 
 # 2. Install dependencies
+brew install aria2 yt-dlp ffmpeg
 npm install
 
 # 3. Launch
