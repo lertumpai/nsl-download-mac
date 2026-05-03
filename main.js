@@ -116,14 +116,15 @@ function findAria2c() {
 
 function getDownloadSpeedArgs() {
   const args = [
-    '--concurrent-fragments', '4', // parallel HLS/DASH segments
+    '--concurrent-fragments', '4',
     '--retries', '10',
     '--fragment-retries', '10',
-    '--buffer-size', '16M',
   ]
   if (findAria2c()) {
-    // 16 parallel HTTP connections for direct video files (mp4, webm, etc.)
-    args.push('--downloader', 'aria2c', '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M')
+    // Only use aria2c for plain http/https (direct mp4/webm files).
+    // Passing it without a protocol specifier also affects m3u8/dash segment
+    // downloads and breaks them on many CDNs.
+    args.push('--downloader', 'aria2c:http,https', '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M')
   }
   return args
 }
@@ -342,7 +343,7 @@ function createBrowserTab(url) {
     // Players like JW Player / ArtPlayer may init 1-8s after the page loads
     ;[1000, 3000, 8000].forEach(delay => {
       setTimeout(async () => {
-        if (view.webContents.isDestroyed()) return
+        if (!view.webContents || view.webContents.isDestroyed()) return
         try {
           const found = await view.webContents.executeJavaScript(PLAYER_DETECT_SCRIPT)
           if (!Array.isArray(found) || !found.length) return
@@ -779,8 +780,11 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   }
 
   let capturedFilePath = ''
+  let allStderr = ''
 
   function runAudio(outTpl, isRetry) {
+    allStderr = ''
+    capturedFilePath = ''
     const proc = spawn(bin, buildAudioArgs(outTpl))
     activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
     let skipped = false
@@ -797,7 +801,10 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
 
     proc.stderr.on('data', data => {
       const msg = data.toString().trim()
-      if (msg) mainWindow?.webContents.send('download:log', { id, msg })
+      if (msg) {
+        allStderr += (allStderr ? '\n' : '') + msg
+        mainWindow?.webContents.send('download:log', { id, msg })
+      }
     })
 
     proc.on('close', code => {
@@ -811,11 +818,13 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       }
       if (code === 0) {
         mainWindow?.webContents.send('download:done', { id, isAudio: true, filePath: capturedFilePath })
-        try {
-          new Notification({ title: 'Audio Extraction Complete', body: title || 'Your audio file is ready.' }).show()
-        } catch {}
+        try { new Notification({ title: 'Audio Extraction Complete', body: title || 'Your audio file is ready.' }).show() } catch {}
+      } else if (capturedFilePath && fs.existsSync(capturedFilePath) && fs.statSync(capturedFilePath).size > 0) {
+        mainWindow?.webContents.send('download:done', { id, isAudio: true, filePath: capturedFilePath })
       } else {
-        mainWindow?.webContents.send('download:failed', { id, code })
+        const errLine = allStderr.split('\n').map(l => l.trim())
+          .find(l => l.toLowerCase().startsWith('error')) || allStderr.split('\n').pop()?.trim() || ''
+        mainWindow?.webContents.send('download:failed', { id, error: errLine || 'Audio extraction failed' })
       }
     })
 
@@ -891,16 +900,20 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
 
   const bin = findBinary('yt-dlp')
 
-  function buildArgs(outTpl) {
+  function buildArgs(outTpl, mkvFallback) {
+    const ffmpegBin = findBinary('ffmpeg')
     const a = [
-      '--format', formatSelector,
-      '--merge-output-format', mergeFormat,
+      '--format', mkvFallback
+        ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best'
+        : formatSelector,
+      '--merge-output-format', mkvFallback ? 'mkv' : mergeFormat,
       '--output', outTpl,
       '--newline', '--no-playlist', '--progress', '--no-overwrites',
-      '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
+      '--windows-filenames',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       ...getDownloadSpeedArgs()
     ]
+    if (path.isAbsolute(ffmpegBin)) a.push('--ffmpeg-location', path.dirname(ffmpegBin))
     if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
       a.push('--add-header', `Referer: ${pageURL}`)
@@ -911,9 +924,23 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   }
 
   let capturedFilePath = ''
+  let allStderr = ''
 
-  function run(outTpl, isRetry) {
-    const proc = spawn(bin, buildArgs(outTpl))
+  function notifyDone() {
+    mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
+    try { new Notification({ title: 'Download Complete', body: title || 'Your video is ready.' }).show() } catch {}
+  }
+
+  function notifyFailed() {
+    const errLine = allStderr.split('\n').map(l => l.trim())
+      .find(l => l.toLowerCase().startsWith('error')) || allStderr.split('\n').pop()?.trim() || ''
+    mainWindow?.webContents.send('download:failed', { id, error: errLine || 'Download failed' })
+  }
+
+  function run(outTpl, isRetry, mkvFallback) {
+    allStderr = ''
+    capturedFilePath = ''
+    const proc = spawn(bin, buildArgs(outTpl, mkvFallback))
     activeDownloads.set(id, { proc, pageURL, title })
     let skipped = false
 
@@ -929,26 +956,30 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
 
     proc.stderr.on('data', data => {
       const msg = data.toString().trim()
-      if (msg) mainWindow?.webContents.send('download:log', { id, msg })
+      if (msg) {
+        allStderr += (allStderr ? '\n' : '') + msg
+        mainWindow?.webContents.send('download:log', { id, msg })
+      }
     })
 
     proc.on('close', code => {
       activeDownloads.delete(id)
       if (code === 0 && skipped && !isRetry) {
-        // File already existed — retry with Unix epoch suffix before the extension
         const epochTpl = outTpl.includes('.%(ext)s')
           ? outTpl.replace('.%(ext)s', `_${Date.now()}.%(ext)s`)
           : `${outTpl}_${Date.now()}`
-        run(epochTpl, true)
+        run(epochTpl, true, mkvFallback)
         return
       }
       if (code === 0) {
-        mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
-        try {
-          new Notification({ title: 'Download Complete', body: title || 'Your video is ready.' }).show()
-        } catch {}
+        notifyDone()
+      } else if (capturedFilePath && fs.existsSync(capturedFilePath) && fs.statSync(capturedFilePath).size > 0) {
+        notifyDone()
+      } else if (!mkvFallback && allStderr.toLowerCase().includes('error opening output files')) {
+        mainWindow?.webContents.send('download:log', { id, msg: '[NSL] MP4 merge failed — retrying as MKV…' })
+        run(outTpl, true, true)
       } else {
-        mainWindow?.webContents.send('download:failed', { id, code })
+        notifyFailed()
       }
     })
 
@@ -958,7 +989,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     })
   }
 
-  run(outputTemplate, false)
+  run(outputTemplate, false, false)
   return id
 })
 
