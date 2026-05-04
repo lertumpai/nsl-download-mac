@@ -265,15 +265,23 @@ function findAria2c() {
 
 function getDownloadSpeedArgs() {
   const args = [
-    '--concurrent-fragments', '4',
+    '--concurrent-fragments', '16',  // parallel HLS/DASH segment downloads (was 4)
     '--retries', '10',
     '--fragment-retries', '10',
+    '--buffer-size', '16M',           // larger write buffer reduces I/O stalls
+    '--socket-timeout', '15',         // don't hang on unresponsive connections
   ]
   if (findAria2c()) {
-    // Only use aria2c for plain http/https (direct mp4/webm files).
-    // Passing it without a protocol specifier also affects m3u8/dash segment
-    // downloads and breaks them on many CDNs.
-    args.push('--downloader', 'aria2c:http,https', '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M')
+    // aria2c for plain http/https only — m3u8/dash segment fetches stay on yt-dlp
+    // native downloader which respects --concurrent-fragments above.
+    args.push(
+      '--downloader', 'aria2c:http,https',
+      '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M --file-allocation=none --optimize-concurrent-downloads=true'
+    )
+  } else {
+    // Native downloader fallback: split large HTTP files into 10 MB chunks
+    // so yt-dlp can download them in parallel ranges.
+    args.push('--http-chunk-size', '10M')
   }
   return args
 }
