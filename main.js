@@ -65,157 +65,8 @@ const detectedByPage = new Map()
 // id → { proc, pageURL, title }
 const activeDownloads = new Map()
 
-// id → { dir, videoPath, audioPath, videoStream, audioStream, title, saveFolder }
-const captureStates = new Map()
-
 let downloadIdCounter = 0
 let playerVisible = false
-
-// ---------------------------------------------------------------------------
-// P2P stream capture — MediaSource interception while browser plays the video
-// ---------------------------------------------------------------------------
-
-const CAPTURE_PATCH_SCRIPT = `;(function(){
-  if(window.__nslPatch)return;window.__nslPatch=true;
-  var sbTypes=new WeakMap();
-  var origAdd=MediaSource.prototype.addSourceBuffer;
-  MediaSource.prototype.addSourceBuffer=function(mime){
-    var sb=origAdd.call(this,mime);
-    sbTypes.set(sb,/video/.test(mime)?'v':'a');
-    console.log('[NSL] addSourceBuffer mime='+mime);
-    return sb;
-  };
-  var origAppend=SourceBuffer.prototype.appendBuffer;
-  SourceBuffer.prototype.appendBuffer=function(data){
-    if(window.__nslCapId){
-      var type=sbTypes.get(this)||'v';
-      var buf;
-      if(data instanceof ArrayBuffer)buf=data.slice(0);
-      else if(ArrayBuffer.isView(data))buf=data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength);
-      if(buf){window.__nsl.sendSegment(window.__nslCapId,type,buf);console.log('[NSL] segment type='+type+' bytes='+buf.byteLength);}
-    }
-    return origAppend.call(this,data);
-  };
-  console.log('[NSL] patch ready');
-})();`
-
-function makeCaptureActivateScript(captureId, streamUrl) {
-  const safeId = String(captureId).replace(/'/g, '')
-  const safeUrl = String(streamUrl).replace(/'/g, "\\'")
-  return `;(function(){
-  window.__nslCapId='${safeId}';
-  console.log('[NSL] capture id set: ${safeId}');
-  var vid=document.querySelector('video');
-  if(vid){vid.addEventListener('ended',function(){if(window.__nslCapId){window.__nsl.endCapture(window.__nslCapId);window.__nslCapId=null;}},{once:true});}
-  try{
-    if(window.Artplayer&&window.Artplayer.instances&&window.Artplayer.instances.length){
-      var art=window.Artplayer.instances[0];
-      var hls=art.hls;
-      console.log('[NSL] art found, hls='+(hls?'yes':'no'));
-      if(hls){
-        /* detach+reattach the SAME HLS instance: forces new SourceBuffers (init segment)
-           while keeping the P2P custom loader attached to the same object */
-        hls.stopLoad();
-        hls.detachMedia();
-        hls.attachMedia(vid||document.querySelector('video'));
-        hls.startLoad(-1);
-        console.log('[NSL] HLS detach+reattach done');
-        setTimeout(function(){try{art.play&&art.play();}catch(e){}},400);
-      } else {
-        var url=(art.option&&art.option.url)||art.url||'${safeUrl}';
-        console.log('[NSL] no hls, trying switchUrl url='+url);
-        if(url&&art.switchUrl){art.switchUrl(url);setTimeout(function(){try{art.play&&art.play();}catch(e){}},500);}
-      }
-    } else { console.log('[NSL] Artplayer not found'); }
-  }catch(e){console.error('[NSL] activate error',e);}
-})();`
-}
-
-async function startP2PCapture(id, pageURL, streamUrl, title, saveFolder) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nsl-p2p-'))
-  captureStates.set(id, {
-    dir,
-    videoPath: path.join(dir, 'v.mp4'),
-    audioPath: path.join(dir, 'a.mp4'),
-    title, saveFolder,
-    videoStream: fs.createWriteStream(path.join(dir, 'v.mp4')),
-    audioStream: fs.createWriteStream(path.join(dir, 'a.mp4')),
-  })
-
-  mainWindow?.webContents.send('download:progress', {
-    id, status: 'recording', percent: 0, speed: 'Capturing via browser…', eta: '', total: ''
-  })
-
-  const view = getActiveView()
-  if (!view) {
-    captureStates.delete(id)
-    mainWindow?.webContents.send('download:failed', { id, error: 'No active browser tab.' })
-    return
-  }
-  try {
-    await view.webContents.executeJavaScript(CAPTURE_PATCH_SCRIPT)
-    await view.webContents.executeJavaScript(makeCaptureActivateScript(id, streamUrl))
-  } catch (err) {
-    captureStates.delete(id)
-    mainWindow?.webContents.send('download:failed', { id, error: `Injection failed: ${err.message}` })
-  }
-}
-
-ipcMain.on('stream:captureChunk', (_, captureId, type, buf) => {
-  const state = captureStates.get(captureId)
-  if (!state) return
-  const stream = type === 'v' ? state.videoStream : state.audioStream
-  stream.write(Buffer.from(buf))
-})
-
-ipcMain.on('stream:captureEnd', (_, captureId) => {
-  const state = captureStates.get(captureId)
-  if (!state) return
-  captureStates.delete(captureId)
-  state.videoStream.end()
-  state.audioStream.end()
-  let closed = 0
-  const onClose = () => { if (++closed >= 2) finishCapture(captureId, state) }
-  state.videoStream.on('close', onClose)
-  state.audioStream.on('close', onClose)
-})
-
-function finishCapture(captureId, state) {
-  const ffmpegBin = findBinary('ffmpeg')
-  const safeName = (state.title || 'video').replace(/[/\\:*?"<>|]/g, '_').trim() || 'video'
-  const outPath = path.join(state.saveFolder, `${safeName}.mp4`)
-
-  const vSize = fs.existsSync(state.videoPath) ? fs.statSync(state.videoPath).size : 0
-  const aSize = fs.existsSync(state.audioPath) ? fs.statSync(state.audioPath).size : 0
-
-  if (vSize === 0 && aSize === 0) {
-    try { fs.rmSync(state.dir, { recursive: true }) } catch {}
-    mainWindow?.webContents.send('download:failed', { id: captureId, error: 'No data captured — play the video first, then try again.' })
-    return
-  }
-
-  const args = ['-y']
-  if (vSize > 0 && aSize > 0) {
-    args.push('-i', state.videoPath, '-i', state.audioPath, '-map', '0:v', '-map', '1:a', '-c', 'copy', outPath)
-  } else if (vSize > 0) {
-    args.push('-i', state.videoPath, '-c', 'copy', outPath)
-  } else {
-    args.push('-i', state.audioPath, '-c', 'copy', outPath)
-  }
-
-  const proc = spawn(ffmpegBin, args)
-  let errOut = ''
-  proc.stderr.on('data', d => { errOut += d.toString() })
-  proc.on('close', code => {
-    try { fs.rmSync(state.dir, { recursive: true }) } catch {}
-    if (code === 0 && fs.existsSync(outPath)) {
-      mainWindow?.webContents.send('download:done', { id: captureId, filePath: outPath })
-      try { new Notification({ title: 'Capture Complete', body: state.title || 'Video saved.' }).show() } catch {}
-    } else {
-      mainWindow?.webContents.send('download:failed', { id: captureId, error: errOut.split('\n').find(l => l.startsWith('Error')) || `Mux failed (code ${code})` })
-    }
-  })
-}
 
 // ---------------------------------------------------------------------------
 // yt-dlp / ffmpeg binary resolution
@@ -653,8 +504,6 @@ function classifyRequest(url, contentType) {
   if (url.includes('video.twimg.com') && url.includes('.mp4')) return 'Twitter'
   // JW Player CDN delivery (cdn.jwplayer.com or jwpcdn.com)
   if ((url.includes('jwpcdn.com') || url.includes('cdn.jwplayer.com')) && url.match(/\.(m3u8|mp4)(\?|$)/i)) return 'Video'
-  // stream1689.com or similar p2p CDN domains
-  if (url.includes('stream1689.com') && url.match(/\.(m3u8|mp4|mpd)(\?|$)/i)) return 'HLS'
   if (url.match(/\.(mp4|webm|mkv|mov|ogg|ogv)(\?|$)/i)) return 'Video'
   if (normType.startsWith('video/') && !url.endsWith('.ts')) return 'Video'
   if (normType.includes('application/octet-stream') && url.match(/\.(mp4|webm|mkv|mov|ogg|ogv|m3u8|mpd)(\?|$)/i)) return 'Video'
@@ -765,7 +614,7 @@ async function scanDOMForVideos() {
           } catch(e) {}
         }
 
-        // Common player config objects — covers stream1689, p2p players, custom embeds
+        // Common player config objects
         ;['playerConfig','_playerConfig','p2pConfig','__streamConfig','streamConfig',
           'videoConfig','nplayer_config','playerVars','_nativeConfig'].forEach(k => {
           try {
@@ -870,13 +719,6 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     const pageData = detectedByPage.get(pageURL)
     const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
-    // P2P streams (stream1689.com /p2p/ paths or streamhls CDN) can't be analysed
-    // by yt-dlp — skip straight to the direct-stream picker.
-    if (/streamhls\.com|steamhls/i.test(targetUrl) || /stream1689\.com.*\/p2p\//i.test(pageURL)) {
-      resolve({ title: pageData?.pageTitle || 'Video', _direct: true, formats: [] })
-      return
-    }
-
     const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
     if (cookiesPath) args.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
@@ -893,16 +735,6 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
       if (line) {
         try { resolve(JSON.parse(line)); return }
         catch {}
-      }
-      // yt-dlp couldn't analyse the URL — fall back to direct-stream mode if we
-      // have an intercepted raw stream URL (m3u8 / mpd / mp4 / no-ext CDN URL).
-      const streamUrl = pageData?.streamUrl
-      if (code !== 0 && streamUrl && (
-        /\.(m3u8|mpd|mp4|webm|mkv|mov)(\?|$)/i.test(streamUrl) ||
-        /streamhls\.com|steamhls/i.test(streamUrl)
-      )) {
-        resolve({ title: pageData?.pageTitle || 'Video', _direct: true, formats: [] })
-        return
       }
       reject(new Error(err.trim() || `yt-dlp exited ${code}`))
     })
@@ -1070,19 +902,6 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
 
   const pageData = detectedByPage.get(pageURL)
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
-
-  // P2P streams: CDN only serves data via WebRTC — route to browser capture mode.
-  const isP2PStream = /streamhls\.com|steamhls/i.test(targetUrl) || /stream1689\.com.*\/p2p\//i.test(pageURL)
-  if (isP2PStream) {
-    const captureStreamUrl = (pageData?.streamUrl && /streamhls\.com|steamhls/i.test(pageData.streamUrl))
-      ? pageData.streamUrl : targetUrl
-    // Return ID first so the renderer creates the downloads entry before the 'recording' event fires.
-    setImmediate(() => {
-      startP2PCapture(id, pageURL, captureStreamUrl, customTitle || title || '', saveFolder)
-        .catch(err => mainWindow?.webContents.send('download:failed', { id, error: err.message }))
-    })
-    return id
-  }
 
   const bin = findBinary('yt-dlp')
 

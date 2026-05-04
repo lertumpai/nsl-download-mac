@@ -304,12 +304,6 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
   try {
     const meta = await window.api.fetchMetadata(pageURL)
 
-    // yt-dlp couldn't analyse the URL but we have an intercepted stream
-    if (meta._direct) {
-      renderDirectStreamPicker(picker, pageURL, pageTitle)
-      return
-    }
-
     formats = buildDisplayFormats(meta.formats || [])
     if (!formats.length) throw new Error('No downloadable formats found')
 
@@ -398,60 +392,6 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
     const customTitle = picker.querySelector('#custom-title').value.trim() || title
     picker.remove()
     activeQualityPicker = null
-    await extractAudioFromPage({ pageURL, title: customTitle, audioFormat: audioFmt, customTitle })
-    switchTab('queue')
-  })
-}
-
-function renderDirectStreamPicker(picker, pageURL, pageTitle) {
-  const defFormat = settings.defaultFormat || 'mp4'
-  const defAudioFormat = settings.defaultAudioFormat || 'mp3'
-  const displayTitle = pageTitle || `playlist_${Date.now()}`
-
-  picker.innerHTML = `
-    <div class="quality-picker-header">
-      <span>Download Stream</span>
-      <button title="Close">✕</button>
-    </div>
-    <div class="quality-direct-note">
-      Stream detected — downloading at best available quality.
-    </div>
-    <div class="filename-edit-row">
-      <input class="filename-edit-input" type="text" id="custom-title"
-             value="${esc(displayTitle)}" placeholder="Filename…" spellcheck="false">
-    </div>
-    <div class="quality-picker-footer">
-      <select class="format-select" id="out-format">
-        <option value="mp4" ${defFormat === 'mp4' ? 'selected' : ''}>MP4</option>
-        <option value="mkv" ${defFormat === 'mkv' ? 'selected' : ''}>MKV</option>
-      </select>
-      <button class="btn btn-primary" style="flex:1" id="btn-start-dl">↓ Download</button>
-    </div>
-    <div class="quality-picker-divider"></div>
-    <div class="quality-picker-footer">
-      <select class="format-select" id="out-audio-format">
-        <option value="mp3" ${defAudioFormat === 'mp3' ? 'selected' : ''}>MP3</option>
-        <option value="aac" ${defAudioFormat === 'aac' ? 'selected' : ''}>AAC</option>
-        <option value="flac" ${defAudioFormat === 'flac' ? 'selected' : ''}>FLAC</option>
-      </select>
-      <button class="btn btn-audio" style="flex:1" id="btn-extract-audio">♪ Extract</button>
-    </div>
-  `
-
-  picker.querySelector('.quality-picker-header button').addEventListener('click', () => {
-    picker.remove(); activeQualityPicker = null
-  })
-  picker.querySelector('#btn-start-dl').addEventListener('click', async () => {
-    const outFmt = picker.querySelector('#out-format').value
-    const customTitle = picker.querySelector('#custom-title').value.trim() || displayTitle
-    picker.remove(); activeQualityPicker = null
-    await startDownload({ pageURL, title: customTitle, formatSelector: 'bestvideo+bestaudio/best', outputFormat: outFmt, customTitle })
-    switchTab('queue')
-  })
-  picker.querySelector('#btn-extract-audio').addEventListener('click', async () => {
-    const audioFmt = picker.querySelector('#out-audio-format').value
-    const customTitle = picker.querySelector('#custom-title').value.trim() || displayTitle
-    picker.remove(); activeQualityPicker = null
     await extractAudioFromPage({ pageURL, title: customTitle, audioFormat: audioFmt, customTitle })
     switchTab('queue')
   })

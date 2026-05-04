@@ -37,9 +37,6 @@ contextBridge.exposeInMainWorld('api', {
   showPlayer: () => ipcRenderer.send('player:show'),
   hidePlayer: () => ipcRenderer.send('player:hide'),
 
-  // P2P capture
-  stopCapture: (id) => ipcRenderer.send('stream:captureEnd', id),
-
   // Clear cache
   clearCache: () => ipcRenderer.invoke('clear-cache'),
 
