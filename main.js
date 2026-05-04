@@ -958,7 +958,6 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
       '--output', outTpl,
-      '--trim-filenames', '180',
       '--newline', '--no-overwrites',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       ...getDownloadSpeedArgs()
@@ -1080,13 +1079,9 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
-  let template = settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s'
-  if (filePrefix) template = `${filePrefix} - ${template}`
-  template = applyCustomTitle(template, customTitle)
   const mergeFormat = settings.defaultFormat || 'mp4'
 
   fs.mkdirSync(saveFolder, { recursive: true })
-  const outputTemplate = path.join(saveFolder, template)
 
   const pageData = detectedByPage.get(pageURL)
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
@@ -1097,22 +1092,30 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     return id
   }
 
+  // Use a collision-safe numeric temp path so FFmpeg never touches user-supplied
+  // strings (avoids "Invalid argument" from special chars or long titles).
+  // After success we rename to the friendly title.
+  const tempBase = path.join(saveFolder, `nsl_dl_${id}`)
+  const tempTemplate = `${tempBase}.%(ext)s`
+
   const bin = findBinary('yt-dlp')
 
-  function buildArgs(outTpl, mkvFallback) {
+  // attempt=0 → mp4 preferred, attempt=1 → mkv fallback, attempt=2 → strict-experimental
+  function buildArgs(attempt) {
     const ffmpegBin = findBinary('ffmpeg')
+    const fmt = attempt === 0
+      ? formatSelector
+      : 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+    const outFmt = attempt === 1 ? 'mkv' : mergeFormat
     const a = [
-      '--format', mkvFallback
-        ? 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best'
-        : formatSelector,
-      '--merge-output-format', mkvFallback ? 'mkv' : mergeFormat,
-      '--output', outTpl,
-      '--trim-filenames', '180',
+      '--format', fmt,
+      '--merge-output-format', outFmt,
+      '--output', tempTemplate,
       '--newline', '--no-playlist', '--progress', '--no-overwrites',
-      '--windows-filenames',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       ...getDownloadSpeedArgs()
     ]
+    if (attempt === 2) a.push('--postprocessor-args', 'ffmpeg:-strict experimental')
     if (path.isAbsolute(ffmpegBin)) a.push('--ffmpeg-location', path.dirname(ffmpegBin))
     if (cookiesPath) a.push('--cookies', cookiesPath)
     if (targetUrl !== pageURL) {
@@ -1127,7 +1130,19 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   let allStderr = ''
 
   function notifyDone() {
-    mainWindow?.webContents.send('download:done', { id, filePath: capturedFilePath })
+    // Rename from safe temp name to user-friendly title
+    let finalPath = capturedFilePath
+    if (capturedFilePath && fs.existsSync(capturedFilePath)) {
+      const ext = path.extname(capturedFilePath)
+      const base = sanitizeFilename(customTitle || title || `video_${id}`).substring(0, 180)
+      const prefix = filePrefix ? `${filePrefix} - ` : ''
+      let desired = path.join(saveFolder, `${prefix}${base}${ext}`)
+      if (fs.existsSync(desired) && desired !== capturedFilePath) {
+        desired = path.join(saveFolder, `${prefix}${base}_${id}${ext}`)
+      }
+      try { fs.renameSync(capturedFilePath, desired); finalPath = desired } catch {}
+    }
+    mainWindow?.webContents.send('download:done', { id, filePath: finalPath })
     try { new Notification({ title: 'Download Complete', body: title || 'Your video is ready.' }).show() } catch {}
   }
 
@@ -1137,16 +1152,14 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     mainWindow?.webContents.send('download:failed', { id, error: errLine || 'Download failed' })
   }
 
-  function run(outTpl, isRetry, mkvFallback) {
+  function run(attempt) {
     allStderr = ''
     capturedFilePath = ''
-    const proc = spawn(bin, buildArgs(outTpl, mkvFallback))
+    const proc = spawn(bin, buildArgs(attempt))
     activeDownloads.set(id, { proc, pageURL, title })
-    let skipped = false
 
     proc.stdout.on('data', data => {
       for (const line of data.toString().split('\n')) {
-        if (line.includes('has already been downloaded')) skipped = true
         const fp = parseFilePath(line)
         if (fp) capturedFilePath = fp
         const p = parseYTDLPLine(line)
@@ -1164,20 +1177,18 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
 
     proc.on('close', code => {
       activeDownloads.delete(id)
-      if (code === 0 && skipped && !isRetry) {
-        const epochTpl = outTpl.includes('.%(ext)s')
-          ? outTpl.replace('.%(ext)s', `_${Date.now()}.%(ext)s`)
-          : `${outTpl}_${Date.now()}`
-        run(epochTpl, true, mkvFallback)
-        return
-      }
       if (code === 0) {
         notifyDone()
       } else if (capturedFilePath && fs.existsSync(capturedFilePath) && fs.statSync(capturedFilePath).size > 0) {
         notifyDone()
-      } else if (!mkvFallback && allStderr.toLowerCase().includes('error opening output files')) {
-        mainWindow?.webContents.send('download:log', { id, msg: '[NSL] MP4 merge failed — retrying as MKV…' })
-        run(outTpl, true, true)
+      } else if (allStderr.toLowerCase().includes('error opening output files') || allStderr.toLowerCase().includes('invalid argument')) {
+        if (attempt < 2) {
+          const label = attempt === 0 ? 'retrying as MKV' : 'retrying with experimental codecs'
+          mainWindow?.webContents.send('download:log', { id, msg: `[NSL] Merge failed — ${label}…` })
+          run(attempt + 1)
+        } else {
+          notifyFailed()
+        }
       } else {
         notifyFailed()
       }
@@ -1189,7 +1200,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     })
   }
 
-  run(outputTemplate, false, false)
+  run(0)
   return id
 })
 
