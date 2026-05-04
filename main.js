@@ -65,8 +65,174 @@ const detectedByPage = new Map()
 // id → { proc, pageURL, title }
 const activeDownloads = new Map()
 
+// id → { dir, videoPath, audioPath, videoStream, audioStream, title, saveFolder, tabId }
+const captureStates = new Map()
+
 let downloadIdCounter = 0
 let playerVisible = false
+
+// ---------------------------------------------------------------------------
+// MSE capture — intercepts SourceBuffer.appendBuffer while the browser plays
+// ---------------------------------------------------------------------------
+
+// Injected into every page on dom-ready. Stores the init segment for each
+// SourceBuffer and forwards live segments when a capture is active.
+const CAPTURE_PATCH_SCRIPT = `;(function(){
+  if(window.__nslMSEPatch)return;window.__nslMSEPatch=true;
+  var tracked=[];
+  var origAdd=MediaSource.prototype.addSourceBuffer;
+  MediaSource.prototype.addSourceBuffer=function(mime){
+    var sb=origAdd.call(this,mime);
+    tracked.push({sb:sb,type:/video/.test(mime)?'v':'a',init:null});
+    return sb;
+  };
+  function find(sb){for(var i=0;i<tracked.length;i++)if(tracked[i].sb===sb)return tracked[i];return null;}
+  var origAppend=SourceBuffer.prototype.appendBuffer;
+  SourceBuffer.prototype.appendBuffer=function(data){
+    var t=find(this);
+    if(t){
+      var buf;
+      if(data instanceof ArrayBuffer)buf=data.slice(0);
+      else if(ArrayBuffer.isView(data))buf=data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength);
+      if(buf){
+        if(!t.init)t.init=buf; // keep first chunk (init/moov segment)
+        if(window.__nslCapId&&window.__nsl)window.__nsl.sendSegment(window.__nslCapId,t.type,buf);
+      }
+    }
+    return origAppend.call(this,data);
+  };
+  // Called when user starts capture — replays stored init segments then goes live
+  window.__nslActivate=function(id){
+    window.__nslCapId=id;
+    tracked.forEach(function(t){if(t.init&&window.__nsl)window.__nsl.sendSegment(id,t.type,t.init);});
+  };
+  // Called to stop capture and finalise
+  window.__nslStop=function(){
+    var id=window.__nslCapId;window.__nslCapId=null;
+    if(id&&window.__nsl)window.__nsl.endCapture(id);
+  };
+  // Expose a check so main process can ask "is MSE active on this page?"
+  window.__nslHasMSE=function(){return tracked.length>0;};
+  // Auto-stop when the video element fires 'ended'
+  document.addEventListener('ended',function(e){
+    if(e.target&&e.target.tagName==='VIDEO'&&window.__nslCapId)window.__nslStop();
+  },true);
+})();`
+
+async function startCapture(id, pageURL, title, saveFolder) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nsl-cap-'))
+  captureStates.set(id, {
+    dir,
+    videoPath: path.join(dir, 'v.mp4'),
+    audioPath: path.join(dir, 'a.mp4'),
+    title, saveFolder,
+    videoStream: fs.createWriteStream(path.join(dir, 'v.mp4')),
+    audioStream: fs.createWriteStream(path.join(dir, 'a.mp4')),
+    tabId: activeTabId,
+  })
+
+  const view = getActiveView()
+  if (!view) {
+    captureStates.delete(id)
+    mainWindow?.webContents.send('download:failed', { id, error: 'No active browser tab.' })
+    return
+  }
+  try {
+    await view.webContents.executeJavaScript(CAPTURE_PATCH_SCRIPT)
+    await view.webContents.executeJavaScript(`window.__nslActivate('${String(id).replace(/'/g, '')}')`)
+    mainWindow?.webContents.send('download:progress', {
+      id, status: 'recording', percent: 0, speed: 'Seek to start and play', eta: '', total: ''
+    })
+  } catch (err) {
+    captureStates.delete(id)
+    mainWindow?.webContents.send('download:failed', { id, error: `Capture failed: ${err.message}` })
+  }
+}
+
+ipcMain.on('stream:captureChunk', (_, captureId, type, buf) => {
+  const state = captureStates.get(captureId)
+  if (!state) return
+  ;(type === 'v' ? state.videoStream : state.audioStream).write(Buffer.from(buf))
+})
+
+ipcMain.on('stream:captureEnd', (_, captureId) => {
+  const state = captureStates.get(captureId)
+  if (!state) return
+  captureStates.delete(captureId)
+  state.videoStream.end()
+  state.audioStream.end()
+  let closed = 0
+  const onClose = () => { if (++closed >= 2) finishCapture(captureId, state) }
+  state.videoStream.on('close', onClose)
+  state.audioStream.on('close', onClose)
+})
+
+// Stop capture and save
+ipcMain.on('capture:stop', (_, id) => {
+  const state = captureStates.get(id)
+  if (!state) return
+  const view = (state.tabId ? browserTabs.get(state.tabId) : null) || getActiveView()
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents.executeJavaScript('window.__nslStop&&window.__nslStop()').catch(() => {
+      ipcMain.emit('stream:captureEnd', null, id)
+    })
+  } else {
+    ipcMain.emit('stream:captureEnd', null, id)
+  }
+})
+
+// Cancel capture and discard temp data
+ipcMain.on('capture:cancel', (_, id) => {
+  const state = captureStates.get(id)
+  if (!state) return
+  captureStates.delete(id)
+  const view = (state.tabId ? browserTabs.get(state.tabId) : null) || getActiveView()
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents.executeJavaScript('window.__nslCapId=null').catch(() => {})
+  }
+  state.videoStream.destroy()
+  state.audioStream.destroy()
+  try { fs.rmSync(state.dir, { recursive: true }) } catch {}
+})
+
+function finishCapture(captureId, state) {
+  const ffmpegBin = findBinary('ffmpeg')
+  const safeName = (state.title || 'video').replace(/[/\\:*?"<>|]/g, '_').trim() || 'video'
+  const outPath = path.join(state.saveFolder, `${safeName}.mp4`)
+
+  const vSize = fs.existsSync(state.videoPath) ? fs.statSync(state.videoPath).size : 0
+  const aSize = fs.existsSync(state.audioPath) ? fs.statSync(state.audioPath).size : 0
+
+  if (vSize === 0 && aSize === 0) {
+    try { fs.rmSync(state.dir, { recursive: true }) } catch {}
+    mainWindow?.webContents.send('download:failed', { id: captureId, error: 'No data captured — seek to start and play the video first.' })
+    return
+  }
+
+  mainWindow?.webContents.send('download:progress', { id: captureId, status: 'muxing', percent: 100, speed: '', eta: '', total: '' })
+
+  const args = ['-y']
+  if (vSize > 0 && aSize > 0) {
+    args.push('-i', state.videoPath, '-i', state.audioPath, '-map', '0:v', '-map', '1:a', '-c', 'copy', outPath)
+  } else if (vSize > 0) {
+    args.push('-i', state.videoPath, '-c', 'copy', outPath)
+  } else {
+    args.push('-i', state.audioPath, '-c', 'copy', outPath)
+  }
+
+  const proc = spawn(ffmpegBin, args)
+  let errOut = ''
+  proc.stderr.on('data', d => { errOut += d.toString() })
+  proc.on('close', code => {
+    try { fs.rmSync(state.dir, { recursive: true }) } catch {}
+    if (code === 0 && fs.existsSync(outPath)) {
+      mainWindow?.webContents.send('download:done', { id: captureId, filePath: outPath })
+      try { new Notification({ title: 'Capture Complete', body: state.title || 'Video saved.' }).show() } catch {}
+    } else {
+      mainWindow?.webContents.send('download:failed', { id: captureId, error: errOut.split('\n').find(l => l.startsWith('Error')) || `Mux failed (code ${code})` })
+    }
+  })
+}
 
 // ---------------------------------------------------------------------------
 // yt-dlp / ffmpeg binary resolution
@@ -349,6 +515,11 @@ function createBrowserTab(url) {
     items.push({ label: 'Back', click: () => view.webContents.canGoBack() && view.webContents.goBack() })
     items.push({ label: 'Reload', click: () => view.webContents.reload() })
     Menu.buildFromTemplate(items).popup({ window: mainWindow })
+  })
+
+  // Inject MSE capture patch as early as possible so init segments are never missed
+  view.webContents.on('dom-ready', () => {
+    view.webContents.executeJavaScript(CAPTURE_PATCH_SCRIPT).catch(() => {})
   })
 
   // Inject overlay download button after each page finishes loading + periodic player API scan
@@ -730,11 +901,27 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     let out = '', err = ''
     proc.stdout.on('data', d => { out += d })
     proc.stderr.on('data', d => { err += d })
-    proc.on('close', code => {
+    proc.on('close', async code => {
       const line = out.split('\n').find(l => l.trim().startsWith('{'))
       if (line) {
         try { resolve(JSON.parse(line)); return }
         catch {}
+      }
+      // yt-dlp failed — check if the page has an MSE player running (P2P / proprietary stream)
+      if (code !== 0) {
+        const activeView = getActiveView()
+        if (activeView && !activeView.webContents.isDestroyed()) {
+          try {
+            await activeView.webContents.executeJavaScript(CAPTURE_PATCH_SCRIPT)
+            const hasMSE = await activeView.webContents.executeJavaScript(
+              'typeof window.__nslHasMSE==="function"&&window.__nslHasMSE()'
+            )
+            if (hasMSE) {
+              resolve({ title: pageData?.pageTitle || 'Video', _capture: true, formats: [] })
+              return
+            }
+          } catch {}
+        }
       }
       reject(new Error(err.trim() || `yt-dlp exited ${code}`))
     })
@@ -771,6 +958,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       '--audio-quality', audioQuality === '320' ? '0' : audioQuality,
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
       '--output', outTpl,
+      '--trim-filenames', '180',
       '--newline', '--no-overwrites',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       ...getDownloadSpeedArgs()
@@ -903,6 +1091,12 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   const pageData = detectedByPage.get(pageURL)
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
+  // MSE capture mode — browser intercepts video data as it plays
+  if (formatSelector === '__capture__') {
+    setImmediate(() => startCapture(id, pageURL, customTitle || title || '', saveFolder))
+    return id
+  }
+
   const bin = findBinary('yt-dlp')
 
   function buildArgs(outTpl, mkvFallback) {
@@ -913,6 +1107,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
         : formatSelector,
       '--merge-output-format', mkvFallback ? 'mkv' : mergeFormat,
       '--output', outTpl,
+      '--trim-filenames', '180',
       '--newline', '--no-playlist', '--progress', '--no-overwrites',
       '--windows-filenames',
       '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',

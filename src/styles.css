@@ -347,6 +347,19 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   transition: width .3s;
 }
 .progress-bar-fill.muxing { background: var(--orange); }
+.progress-bar-fill.recording-pulse {
+  background: #e03e3e;
+  animation: rec-pulse 1.4s ease-in-out infinite;
+}
+@keyframes rec-pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+.capture-picker-note {
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--text3);
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
 .download-meta {
   display: flex; justify-content: space-between;
   font-size: 10.5px; color: var(--text3); margin-top: 3px;

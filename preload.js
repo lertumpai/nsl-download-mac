@@ -37,6 +37,10 @@ contextBridge.exposeInMainWorld('api', {
   showPlayer: () => ipcRenderer.send('player:show'),
   hidePlayer: () => ipcRenderer.send('player:hide'),
 
+  // MSE capture
+  stopCapture:   (id) => ipcRenderer.send('capture:stop', id),
+  cancelCapture: (id) => ipcRenderer.send('capture:cancel', id),
+
   // Clear cache
   clearCache: () => ipcRenderer.invoke('clear-cache'),
 

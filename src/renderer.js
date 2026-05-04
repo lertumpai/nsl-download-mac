@@ -79,7 +79,11 @@ function bindEvents() {
     const a = btn.dataset.action
     if (a === 'pause'  && dl) { dl.status = 'paused';       window.api.pauseDownload(id);  renderDownloadItem(id) }
     if (a === 'resume' && dl) { dl.status = 'downloading';  window.api.resumeDownload(id); renderDownloadItem(id) }
-    if (a === 'cancel')       { downloads.delete(id); window.api.cancelDownload(id); item.remove(); updateQueueEmpty() }
+    if (a === 'stop-capture' && dl) { window.api.stopCapture(id) }
+    if (a === 'cancel') {
+      if (dl && dl.isCapture) { window.api.cancelCapture(id) } else { window.api.cancelDownload(id) }
+      downloads.delete(id); item.remove(); updateQueueEmpty()
+    }
     if (a === 'retry'  && dl) { startRetry(dl) }
   })
 
@@ -304,6 +308,11 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
   try {
     const meta = await window.api.fetchMetadata(pageURL)
 
+    if (meta._capture) {
+      renderCapturePicker(picker, pageURL, pageTitle)
+      return
+    }
+
     formats = buildDisplayFormats(meta.formats || [])
     if (!formats.length) throw new Error('No downloadable formats found')
 
@@ -393,6 +402,39 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
     picker.remove()
     activeQualityPicker = null
     await extractAudioFromPage({ pageURL, title: customTitle, audioFormat: audioFmt, customTitle })
+    switchTab('queue')
+  })
+}
+
+// ── MSE capture picker ────────────────────────────────────────────
+function renderCapturePicker(picker, pageURL, pageTitle) {
+  const displayTitle = pageTitle || `capture_${Date.now()}`
+  picker.innerHTML = `
+    <div class="quality-picker-header">
+      <span>Record Stream</span>
+      <button title="Close">✕</button>
+    </div>
+    <div class="capture-picker-note">
+      P2P stream detected — yt-dlp can't download it directly.<br>
+      Click Start, then <strong>seek to the beginning</strong> and play the video through.
+    </div>
+    <div class="filename-edit-row">
+      <input class="filename-edit-input" type="text" id="cap-title"
+             value="${esc(displayTitle)}" placeholder="Filename…" spellcheck="false">
+    </div>
+    <div class="quality-picker-footer">
+      <button class="btn btn-primary" style="flex:1" id="btn-start-cap">⏺ Start Recording</button>
+    </div>
+  `
+  picker.querySelector('.quality-picker-header button').addEventListener('click', () => {
+    picker.remove(); activeQualityPicker = null
+  })
+  picker.querySelector('#btn-start-cap').addEventListener('click', async () => {
+    const customTitle = picker.querySelector('#cap-title').value.trim() || displayTitle
+    picker.remove(); activeQualityPicker = null
+    const id = await window.api.startDownload({ pageURL, title: customTitle, formatSelector: '__capture__', customTitle })
+    downloads.set(id, { id, pageURL, title: customTitle, status: 'recording', percent: 0, speed: 'Seek to start and play', eta: '', total: '', error: '', isCapture: true })
+    renderDownloadItem(id)
     switchTab('queue')
   })
 }
@@ -625,26 +667,29 @@ function renderDownloadItem(id) {
 
   const isMuxing     = dl.status === 'muxing'
   const isExtracting = dl.status === 'extracting'
-  const isFailed = dl.status === 'failed'
+  const isRecording  = dl.status === 'recording'
+  const isFailed     = dl.status === 'failed'
   const pct = dl.percent || 0
 
   item.innerHTML = `
     <div class="download-title" title="${esc(dl.title)}">${esc(dl.title)}</div>
     <div class="progress-bar-track">
-      <div class="progress-bar-fill ${isMuxing ? 'muxing' : ''}"
-           style="width:${pct}%"></div>
+      <div class="progress-bar-fill ${isMuxing ? 'muxing' : ''} ${isRecording ? 'recording-pulse' : ''}"
+           style="width:${isRecording ? 100 : pct}%"></div>
     </div>
     <div class="download-meta">
-      <span>${isFailed ? '⚠ ' + esc(dl.error) : isExtracting ? 'Extracting audio…' : isMuxing ? 'Merging…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
-      <span>${dl.speed ? dl.speed + (dl.eta ? ' · ETA ' + dl.eta : '') : ''}</span>
+      <span>${isFailed ? '⚠ ' + esc(dl.error) : isExtracting ? 'Extracting audio…' : isMuxing ? 'Merging…' : isRecording ? '⏺ Recording…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
+      <span>${isRecording ? (dl.speed || '') : dl.speed ? dl.speed + (dl.eta ? ' · ETA ' + dl.eta : '') : ''}</span>
     </div>
     <div class="download-actions">
       ${isFailed
         ? `<button class="icon-btn" data-action="retry" title="Retry">↺ Retry</button>`
+        : isRecording
+        ? `<button class="icon-btn" data-action="stop-capture" title="Stop and save">⏹ Stop</button>`
         : dl.status === 'paused'
         ? `<button class="icon-btn" data-action="resume" title="Resume">▶ Resume</button>`
         : `<button class="icon-btn" data-action="pause"  title="Pause">⏸</button>`}
-      <button class="icon-btn danger" data-action="cancel" title="Cancel">✕</button>
+      ${isRecording ? '' : `<button class="icon-btn danger" data-action="cancel" title="Cancel">✕</button>`}
     </div>
   `
 
