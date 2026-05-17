@@ -13,13 +13,15 @@ Built with Electron + yt-dlp.
 | Node.js | 18 or later | [nodejs.org](https://nodejs.org) or `brew install node` |
 | yt-dlp | latest | `brew install yt-dlp` |
 | FFmpeg | latest | `brew install ffmpeg` |
+| aria2 | latest | `brew install aria2` (recommended for fastest HTTP downloads) |
 
-Verify all three are available:
+Verify the tools are available:
 
 ```bash
 node --version      # v18+
 yt-dlp --version
 ffmpeg -version
+aria2c --version
 ```
 
 ---
@@ -158,6 +160,8 @@ Click **⚙** in the toolbar or open the **SETTINGS** tab in the sidebar.
 | Save folder | `~/Movies/NSL Downloads` | Created automatically on first download |
 | Filename template | `%(title)s [%(height)sp].%(ext)s` | yt-dlp output template syntax |
 | Concurrent downloads | 3 | Max parallel downloads |
+| Stream fragments | 32 | Parallel HLS/DASH fragments per active download |
+| HTTP connections | 16 | aria2 connections per direct HTTP(S) download |
 | Homepage | `https://www.youtube.com` | Browser start page |
 
 ---

@@ -20,6 +20,8 @@ try {
       saveFolder: path.join(os.homedir(), 'Movies', 'NSL Downloads'),
       filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
       maxConcurrentDownloads: 3,
+      fragmentConcurrency: 32,
+      httpConnections: 16,
       homepage: 'https://www.google.com',
       windowBounds: { width: 1300, height: 820 },
       defaultAudioFormat: 'mp3',
@@ -34,6 +36,8 @@ try {
     saveFolder: path.join(os.homedir(), 'Movies', 'NSL Downloads'),
     filenameTemplate: '%(title)s [%(height)sp].%(ext)s',
     maxConcurrentDownloads: 3,
+    fragmentConcurrency: 32,
+    httpConnections: 16,
     homepage: 'https://www.google.com',
     windowBounds: { width: 1300, height: 820 },
     defaultAudioFormat: 'mp3',
@@ -64,6 +68,7 @@ const detectedByPage = new Map()
 
 // id → { proc, pageURL, title }
 const activeDownloads = new Map()
+const queuedDownloads = new Map()
 
 // id → { dir, videoPath, audioPath, videoStream, audioStream, title, saveFolder, tabId }
 const captureStates = new Map()
@@ -239,7 +244,8 @@ function finishCapture(captureId, state) {
 // ---------------------------------------------------------------------------
 function findBinary(name) {
   // 0. Explicit override from environment
-  if (process.env.YTDLP_PATH && fs.existsSync(process.env.YTDLP_PATH)) return process.env.YTDLP_PATH
+  const envKey = { 'yt-dlp': 'YTDLP_PATH', ffmpeg: 'FFMPEG_PATH', aria2c: 'ARIA2C_PATH' }[name]
+  if (envKey && process.env[envKey] && fs.existsSync(process.env[envKey])) return process.env[envKey]
 
   // 1. Prefer a PATH-installed binary if available
   try {
@@ -266,13 +272,40 @@ function findBinary(name) {
 // ---------------------------------------------------------------------------
 // Download speed helpers
 // ---------------------------------------------------------------------------
+function clampInt(value, min, max, fallback) {
+  const n = Number.parseInt(value, 10)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(min, Math.min(max, n))
+}
+
+function getMaxConcurrentDownloads() {
+  return clampInt(store.get('maxConcurrentDownloads'), 1, 10, 3)
+}
+
+function getDownloadTuning() {
+  return {
+    fragments: clampInt(store.get('fragmentConcurrency'), 1, 64, 32),
+    connections: clampInt(store.get('httpConnections'), 1, 32, 16),
+  }
+}
+
 let _aria2cPath = undefined
 function findAria2c() {
   if (_aria2cPath !== undefined) return _aria2cPath
+  if (process.env.ARIA2C_PATH && fs.existsSync(process.env.ARIA2C_PATH)) {
+    _aria2cPath = process.env.ARIA2C_PATH
+    return _aria2cPath
+  }
   try {
     const r = spawnSync('which', ['aria2c'], { encoding: 'utf8' })
     if (r.status === 0 && r.stdout.trim()) { _aria2cPath = r.stdout.trim(); return _aria2cPath }
   } catch {}
+  for (const p of [
+    path.join(process.resourcesPath || '', 'bin', 'aria2c'),
+    path.join(__dirname, 'bin', 'aria2c'),
+  ]) {
+    if (fs.existsSync(p)) { _aria2cPath = p; return _aria2cPath }
+  }
   for (const p of ['/opt/homebrew/bin/aria2c', '/usr/local/bin/aria2c', '/usr/bin/aria2c']) {
     if (fs.existsSync(p)) { _aria2cPath = p; return _aria2cPath }
   }
@@ -281,26 +314,53 @@ function findAria2c() {
 }
 
 function getDownloadSpeedArgs() {
+  const tuning = getDownloadTuning()
+  const chunkSize = tuning.connections >= 16 ? '5M' : '10M'
   const args = [
-    '--concurrent-fragments', '16',  // parallel HLS/DASH segment downloads (was 4)
-    '--retries', '10',
-    '--fragment-retries', '10',
-    '--buffer-size', '16M',           // larger write buffer reduces I/O stalls
-    '--socket-timeout', '15',         // don't hang on unresponsive connections
+    '--concurrent-fragments', String(tuning.fragments),
+    '--retries', '20',
+    '--fragment-retries', '20',
+    '--file-access-retries', '10',
+    '--extractor-retries', '5',
+    '--buffer-size', '16M',
+    '--socket-timeout', '15',
+    '--throttled-rate', '100K',
   ]
   if (findAria2c()) {
-    // aria2c for plain http/https only — m3u8/dash segment fetches stay on yt-dlp
-    // native downloader which respects --concurrent-fragments above.
+    // aria2c accelerates direct HTTP(S) files. HLS/DASH stays native so
+    // yt-dlp can still coordinate fragment retries and progress correctly.
     args.push(
       '--downloader', 'aria2c:http,https',
-      '--downloader-args', 'aria2c:-x 16 -s 16 -k 1M --file-allocation=none --optimize-concurrent-downloads=true'
+      '--downloader-args',
+      `aria2c:-x ${tuning.connections} -s ${tuning.connections} -j ${tuning.connections} -k 1M --min-split-size=1M --file-allocation=none --optimize-concurrent-downloads=true --summary-interval=0`
     )
   } else {
-    // Native downloader fallback: split large HTTP files into 10 MB chunks
-    // so yt-dlp can download them in parallel ranges.
-    args.push('--http-chunk-size', '10M')
+    // Native downloader fallback: smaller HTTP range chunks help work around
+    // hosts that throttle long-lived single connections.
+    args.push('--http-chunk-size', chunkSize)
   }
   return args
+}
+
+function drainDownloadQueue() {
+  while (activeDownloads.size < getMaxConcurrentDownloads() && queuedDownloads.size) {
+    const [id, job] = queuedDownloads.entries().next().value
+    queuedDownloads.delete(id)
+    job.start()
+  }
+}
+
+function queueDownload(id, job) {
+  queuedDownloads.set(id, job)
+  mainWindow?.webContents.send('download:progress', {
+    id, status: 'queued', percent: 0, speed: 'Waiting for a slot', eta: '', total: ''
+  })
+  drainDownloadQueue()
+}
+
+function finishActiveDownload(id) {
+  activeDownloads.delete(id)
+  drainDownloadQueue()
 }
 
 function normalizeVKUrl(url) {
@@ -976,6 +1036,9 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   function runAudio(outTpl, isRetry) {
     allStderr = ''
     capturedFilePath = ''
+    mainWindow?.webContents.send('download:progress', {
+      id, status: 'downloading', percent: 0, speed: 'Starting...', eta: '', total: ''
+    })
     const proc = spawn(bin, buildAudioArgs(outTpl))
     activeDownloads.set(id, { procs: [proc], pageURL, title, isAudio: true })
     let skipped = false
@@ -1017,15 +1080,16 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
           .find(l => l.toLowerCase().startsWith('error')) || allStderr.split('\n').pop()?.trim() || ''
         mainWindow?.webContents.send('download:failed', { id, error: errLine || 'Audio extraction failed' })
       }
+      drainDownloadQueue()
     })
 
     proc.on('error', err => {
-      activeDownloads.delete(id)
+      finishActiveDownload(id)
       mainWindow?.webContents.send('download:failed', { id, error: err.message })
     })
   }
 
-  runAudio(outputTemplate, false)
+  queueDownload(id, { start: () => runAudio(outputTemplate, false) })
   return id
 })
 
@@ -1073,12 +1137,12 @@ ipcMain.handle('playlist:fetch', async (_, playlistURL) => {
 // ---------------------------------------------------------------------------
 // IPC — download management
 // ---------------------------------------------------------------------------
-ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix, customTitle }) => {
+ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, filePrefix, customTitle, outputFormat }) => {
   const cookiesPath = await exportCookies()
   const id = String(++downloadIdCounter)
   const settings = store.store || {}
   const saveFolder = settings.saveFolder || path.join(os.homedir(), 'Movies', 'NSL Downloads')
-  const mergeFormat = settings.defaultFormat || 'mp4'
+  const mergeFormat = outputFormat || settings.defaultFormat || 'mp4'
 
   fs.mkdirSync(saveFolder, { recursive: true })
 
@@ -1153,6 +1217,9 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   function run(attempt) {
     allStderr = ''
     capturedFilePath = ''
+    mainWindow?.webContents.send('download:progress', {
+      id, status: 'downloading', percent: 0, speed: 'Starting...', eta: '', total: ''
+    })
     const proc = spawn(bin, buildArgs(attempt))
     activeDownloads.set(id, { procs: [proc], pageURL, title })
 
@@ -1190,21 +1257,23 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
       } else {
         notifyFailed()
       }
+      drainDownloadQueue()
     })
 
     proc.on('error', err => {
-      activeDownloads.delete(id)
+      finishActiveDownload(id)
       mainWindow?.webContents.send('download:failed', { id, error: err.message })
     })
   }
 
-  run(0)
+  queueDownload(id, { start: () => run(0) })
   return id
 })
 
 ipcMain.on('ytdlp:cancel', (_, id) => {
+  if (queuedDownloads.delete(id)) return
   const d = activeDownloads.get(id)
-  if (d) { (d.procs || [d.proc]).forEach(p => p?.kill()); activeDownloads.delete(id) }
+  if (d) { (d.procs || [d.proc]).forEach(p => p?.kill()); finishActiveDownload(id) }
 })
 
 ipcMain.on('ytdlp:pause',  (_, id) => { const d = activeDownloads.get(id); if (d) (d.procs || [d.proc]).forEach(p => p?.kill('SIGSTOP')) })
@@ -1277,11 +1346,19 @@ ipcMain.handle('settings:get', () => store.store || {
   saveFolder: store.get('saveFolder'),
   filenameTemplate: store.get('filenameTemplate'),
   maxConcurrentDownloads: store.get('maxConcurrentDownloads'),
+  fragmentConcurrency: store.get('fragmentConcurrency'),
+  httpConnections: store.get('httpConnections'),
   homepage: store.get('homepage'),
   defaultAudioFormat: store.get('defaultAudioFormat'),
   audioQuality: store.get('audioQuality')
 })
-ipcMain.on('settings:set', (_, key, value) => store.set(key, value))
+ipcMain.on('settings:set', (_, key, value) => {
+  if (key === 'maxConcurrentDownloads') value = clampInt(value, 1, 10, 3)
+  if (key === 'fragmentConcurrency') value = clampInt(value, 1, 64, 32)
+  if (key === 'httpConnections') value = clampInt(value, 1, 32, 16)
+  store.set(key, value)
+  if (key === 'maxConcurrentDownloads') drainDownloadQueue()
+})
 
 // ---------------------------------------------------------------------------
 // IPC — video overlay / context-menu download request

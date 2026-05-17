@@ -465,8 +465,8 @@ async function extractAudioFromPage({ pageURL, title, audioFormat, filePrefix, c
   })
   downloads.set(id, {
     id, pageURL, title,
-    status: 'downloading', percent: 0,
-    speed: '', eta: '', total: '', error: '',
+    status: 'queued', percent: 0,
+    speed: 'Waiting for a slot', eta: '', total: '', error: '',
     isAudio: true
   })
   $('queue-empty').style.display = 'none'
@@ -663,8 +663,8 @@ async function startDownload({ pageURL, title, formatSelector, outputFormat, fil
 
   downloads.set(id, {
     id, pageURL, title,
-    status: 'downloading', percent: 0,
-    speed: '', eta: '', total: '', error: ''
+    status: 'queued', percent: 0,
+    speed: 'Waiting for a slot', eta: '', total: '', error: ''
   })
 
   $('queue-empty').style.display = 'none'
@@ -687,6 +687,7 @@ function renderDownloadItem(id) {
   const isMuxing     = dl.status === 'muxing'
   const isExtracting = dl.status === 'extracting'
   const isRecording  = dl.status === 'recording'
+  const isQueued     = dl.status === 'queued'
   const isFailed     = dl.status === 'failed'
   const pct = dl.percent || 0
 
@@ -697,12 +698,14 @@ function renderDownloadItem(id) {
            style="width:${isRecording ? 100 : pct}%"></div>
     </div>
     <div class="download-meta">
-      <span>${isFailed ? '⚠ ' + esc(dl.error) : isExtracting ? 'Extracting audio…' : isMuxing ? 'Merging…' : isRecording ? '⏺ Recording…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
+      <span>${isFailed ? '⚠ ' + esc(dl.error) : isQueued ? 'Queued' : isExtracting ? 'Extracting audio…' : isMuxing ? 'Merging…' : isRecording ? '⏺ Recording…' : pct.toFixed(1) + '%' + (dl.total ? ' of ' + dl.total : '')}</span>
       <span>${isRecording ? (dl.speed || '') : dl.speed ? dl.speed + (dl.eta ? ' · ETA ' + dl.eta : '') : ''}</span>
     </div>
     <div class="download-actions">
       ${isFailed
         ? `<button class="icon-btn" data-action="retry" title="Retry">↺ Retry</button>`
+        : isQueued
+        ? ''
         : isRecording
         ? `<button class="icon-btn" data-action="stop-capture" title="Stop and save">⏹ Stop</button>`
         : dl.status === 'paused'
@@ -809,6 +812,8 @@ function applySettingsToForm() {
   setVal('s-folder',        settings.saveFolder     || '')
   setVal('s-template',      settings.filenameTemplate || '%(title)s [%(height)sp].%(ext)s')
   setVal('s-concurrency',   String(settings.maxConcurrentDownloads || 3))
+  setVal('s-fragments',     String(settings.fragmentConcurrency || 32))
+  setVal('s-http-connections', String(settings.httpConnections || 16))
   setVal('s-homepage',      settings.homepage || 'https://www.google.com')
   setVal('s-audio-format',  settings.defaultAudioFormat || 'mp3')
   setVal('s-audio-quality', settings.audioQuality || '320')
@@ -827,6 +832,8 @@ function bindSettingsForm() {
   save('defaultFormat',         's-format')
   save('filenameTemplate',      's-template')
   save('maxConcurrentDownloads','s-concurrency', v => parseInt(v, 10))
+  save('fragmentConcurrency',   's-fragments', v => parseInt(v, 10))
+  save('httpConnections',       's-http-connections', v => parseInt(v, 10))
   save('homepage',              's-homepage')
   save('defaultAudioFormat',    's-audio-format')
   save('audioQuality',          's-audio-quality')
