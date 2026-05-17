@@ -977,7 +977,7 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
     allStderr = ''
     capturedFilePath = ''
     const proc = spawn(bin, buildAudioArgs(outTpl))
-    activeDownloads.set(id, { proc, pageURL, title, isAudio: true })
+    activeDownloads.set(id, { procs: [proc], pageURL, title, isAudio: true })
     let skipped = false
 
     proc.stdout.on('data', data => {
@@ -1129,7 +1129,6 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   let allStderr = ''
 
   function notifyDone() {
-    // Rename from safe temp name to user-friendly title
     let finalPath = capturedFilePath
     if (capturedFilePath && fs.existsSync(capturedFilePath)) {
       const ext = path.extname(capturedFilePath)
@@ -1155,7 +1154,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     allStderr = ''
     capturedFilePath = ''
     const proc = spawn(bin, buildArgs(attempt))
-    activeDownloads.set(id, { proc, pageURL, title })
+    activeDownloads.set(id, { procs: [proc], pageURL, title })
 
     proc.stdout.on('data', data => {
       for (const line of data.toString().split('\n')) {
@@ -1205,11 +1204,11 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
 
 ipcMain.on('ytdlp:cancel', (_, id) => {
   const d = activeDownloads.get(id)
-  if (d) { d.proc.kill(); activeDownloads.delete(id) }
+  if (d) { (d.procs || [d.proc]).forEach(p => p?.kill()); activeDownloads.delete(id) }
 })
 
-ipcMain.on('ytdlp:pause', (_, id) => { activeDownloads.get(id)?.proc.kill('SIGSTOP') })
-ipcMain.on('ytdlp:resume', (_, id) => { activeDownloads.get(id)?.proc.kill('SIGCONT') })
+ipcMain.on('ytdlp:pause',  (_, id) => { const d = activeDownloads.get(id); if (d) (d.procs || [d.proc]).forEach(p => p?.kill('SIGSTOP')) })
+ipcMain.on('ytdlp:resume', (_, id) => { const d = activeDownloads.get(id); if (d) (d.procs || [d.proc]).forEach(p => p?.kill('SIGCONT')) })
 
 // ---------------------------------------------------------------------------
 // IPC — file system
