@@ -940,10 +940,9 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
   const audioQuality = settings.audioQuality || '320'
 
   fs.mkdirSync(saveFolder, { recursive: true })
-  let template = '%(title)s.%(ext)s'
-  if (filePrefix) template = `${filePrefix} - ${template}`
-  template = applyCustomTitle(template, customTitle)
-  const outputTemplate = path.join(saveFolder, template)
+  const audioBase = customTitle ? sanitizeFilename(customTitle) : generateDefaultFilename()
+  const audioPrefix = filePrefix ? `${filePrefix} - ` : ''
+  const outputTemplate = path.join(saveFolder, `${audioPrefix}${audioBase}.%(ext)s`)
 
   const pageData = detectedByPage.get(pageURL)
   const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
@@ -1134,7 +1133,7 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     let finalPath = capturedFilePath
     if (capturedFilePath && fs.existsSync(capturedFilePath)) {
       const ext = path.extname(capturedFilePath)
-      const base = sanitizeFilename(customTitle || title || `video_${id}`).substring(0, 180)
+      const base = customTitle ? sanitizeFilename(customTitle).substring(0, 180) : generateDefaultFilename()
       const prefix = filePrefix ? `${filePrefix} - ` : ''
       let desired = path.join(saveFolder, `${prefix}${base}${ext}`)
       if (fs.existsSync(desired) && desired !== capturedFilePath) {
@@ -1344,6 +1343,14 @@ async function exportCookies() {
 // ---------------------------------------------------------------------------
 function sanitizeFilename(name) {
   return String(name || '').replace(/[/\\:*?"<>|]/g, '_').trim() || 'video'
+}
+
+function generateDefaultFilename() {
+  const now = new Date()
+  const p = n => String(n).padStart(2, '0')
+  const ts = `${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+  const rand = String(Math.floor(Math.random() * 1000000)).padStart(6, '0')
+  return `${ts}_${rand}`
 }
 
 function applyCustomTitle(template, customTitle) {

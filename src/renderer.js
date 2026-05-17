@@ -1,3 +1,11 @@
+function generateDefaultFilename() {
+  const now = new Date()
+  const p = n => String(n).padStart(2, '0')
+  const ts = `${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
+  const rand = String(Math.floor(Math.random() * 1000000)).padStart(6, '0')
+  return `${ts}_${rand}`
+}
+
 // ── State ────────────────────────────────────────────────────────
 const detectedPages = new Map()  // pageURL → { pageURL, pageTitle, favicon, types[] }
 const downloads     = new Map()  // id → download object
@@ -343,6 +351,7 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
 function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
   const defFormat = settings.defaultFormat || 'mp4'
   const defAudioFormat = settings.defaultAudioFormat || 'mp3'
+  const defaultFilename = generateDefaultFilename()
 
   picker.innerHTML = `
     <div class="quality-picker-header">
@@ -352,7 +361,7 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
     <div class="format-list"></div>
     <div class="filename-edit-row">
       <input class="filename-edit-input" type="text" id="custom-title"
-             value="${esc(title)}" placeholder="Filename…" spellcheck="false">
+             value="${esc(defaultFilename)}" placeholder="Filename…" spellcheck="false">
     </div>
     <div class="quality-picker-footer">
       <select class="format-select" id="out-format">
@@ -418,7 +427,7 @@ function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
 
 // ── MSE capture picker ────────────────────────────────────────────
 function renderCapturePicker(picker, pageURL, pageTitle) {
-  const displayTitle = pageTitle || `capture_${Date.now()}`
+  const displayTitle = generateDefaultFilename()
   picker.innerHTML = `
     <div class="quality-picker-header">
       <span>Record Stream</span>
