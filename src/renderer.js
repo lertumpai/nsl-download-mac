@@ -56,6 +56,7 @@ function bindEvents() {
   $('btn-settings').addEventListener('click', () => switchTab('settings'))
 
   $('btn-new-tab').addEventListener('click', async () => {
+    if (playerActive) closePlayer()
     const id = await window.api.createTab(settings.homepage || 'https://www.google.com')
     browserTabsList.push({ id, url: '', title: 'New Tab', loading: false })
     activeBrowserTabId = id
@@ -847,6 +848,7 @@ function renderBrowserTabs() {
     // Switch tab on click
     el.addEventListener('click', (e) => {
       if (e.target.classList.contains('browser-tab-close')) return
+      if (playerActive) closePlayer()
       activeBrowserTabId = tab.id
       window.api.switchTab(tab.id)
       renderBrowserTabs()
