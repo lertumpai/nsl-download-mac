@@ -55,6 +55,13 @@ function bindEvents() {
   btnRel.addEventListener('click',     () => window.api.reload())
   $('btn-settings').addEventListener('click', () => switchTab('settings'))
 
+  $('btn-clear-detected').addEventListener('click', () => {
+    detectedPages.clear()
+    $('detected-list').innerHTML = ''
+    $('detected-empty').style.display = ''
+    $('detected-toolbar').style.display = 'none'
+  })
+
   $('btn-new-tab').addEventListener('click', async () => {
     if (playerActive) closePlayer()
     const id = await window.api.createTab(settings.homepage || 'https://www.google.com')
@@ -219,6 +226,7 @@ function upsertDetectedVideo(pageURL, pageTitle, types) {
   detectedPages.set(pageURL, entry)
   prependDetectedCard(entry)
   $('detected-empty').style.display = 'none'
+  $('detected-toolbar').style.display = ''
 }
 
 function prependDetectedCard(entry) {
@@ -253,6 +261,7 @@ function prependDetectedCard(entry) {
     card.remove()
     if (!$('detected-list').hasChildNodes()) {
       $('detected-empty').style.display = ''
+      $('detected-toolbar').style.display = 'none'
     }
   })
 
