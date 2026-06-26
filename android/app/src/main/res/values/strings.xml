@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NSL Downloader</string>
+    <string name="tab_browser">Browser</string>
+    <string name="tab_library">Library</string>
+    <string name="url_hint">Search or enter URL</string>
+    <string name="download">Download</string>
+    <string name="remove">Remove</string>
+    <string name="remove_all">Remove all</string>
+    <string name="empty_library">No downloads yet.\nFind a video in the Browser tab.</string>
+    <string name="back">Back</string>
+    <string name="forward">Forward</string>
+    <string name="go">Go</string>
+    <string name="reload">Reload</string>
+    <string name="close">Close</string>
+    <string name="thumbnail">Thumbnail</string>
+    <string name="minus_10">-10s</string>
+    <string name="plus_10">+10s</string>
+</resources>
