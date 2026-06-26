@@ -11,16 +11,29 @@ of any content/streaming type, and **play them back** with a gesture-driven play
   (`shouldInterceptRequest`). Direct files (`.mp4/.webm/.mkv/.mov/.ts/...`), **HLS**
   (`.m3u8`), **DASH** (`.mpd`) and `videoplayback`/`manifest` patterns are recognised.
   A floating **Download (N)** button lists every detected stream to pick from.
+- **Quality selection** — when an HLS stream is a master playlist, a **Select quality**
+  dialog lists every resolution variant (e.g. **1080p / 720p / 480p**, with bitrate) so you
+  pick the size *before* downloading. Single-quality streams skip the dialog.
+- **Forwarded headers/cookies** — downloads reuse the WebView's **User-Agent**, the page
+  **Referer/Origin**, the request headers the WebView itself sent, and the current
+  **cookies**. This is what makes CDN-protected sites (e.g. **missav**) work instead of
+  returning `403 Forbidden`.
 - **Download engine** (`DownloadService`, a foreground service with a progress notification):
   - Direct files → streamed to disk with OkHttp.
-  - **HLS** → native downloader (`HlsDownloader`): resolves the highest-bandwidth variant,
+  - **HLS** → native downloader (`HlsDownloader`): downloads the chosen variant,
     parses the media playlist, **decrypts AES-128 segments**, and concatenates to a
     playable `.ts`. No ffmpeg dependency.
   - DASH/progressive → fetched directly.
+- **Live progress & speed** — each downloading item shows a progress bar with **percent and
+  download speed** (e.g. `40% • 721 KB/s`) in the Library, and the same in the notification.
+  Progress is published through an in-memory `DownloadProgressBus` (not Room, to avoid disk
+  churn) and merged with the list via `combine()`.
 - **Library tab** — Room-backed list with auto-generated video thumbnails (Glide), title,
   size and date.
   - **Delete one** — trash icon → confirm → removes the DB row **and the file(s)**.
   - **Remove all** — wipes every entry and the whole `downloads/` directory.
+- **Chrome-less UI** — no action bar; the browser address bar / library header sit directly
+  under the status bar (insets handled via `fitsSystemWindows`).
 - **Player** (`PlayerActivity`, ExoPlayer/Media3, landscape):
   - **Swipe left / right** = **−10s / +10s**.
   - On-screen **−10s / +10s** buttons.

@@ -9,17 +9,22 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class VideoSniffer {
 
-    data class Candidate(val url: String, val mimeType: String?, val seenAt: Long)
+    data class Candidate(
+        val url: String,
+        val mimeType: String?,
+        val headers: Map<String, String>,
+        val seenAt: Long
+    )
 
     private val found = ConcurrentHashMap<String, Candidate>()
     var onNewVideo: ((Candidate) -> Unit)? = null
 
-    fun consider(url: String, mimeType: String?) {
+    fun consider(url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
         if (url.isBlank()) return
         if (!isLikelyVideoUrl(url, mimeType)) return
         val key = normalizeKey(url)
         if (found.containsKey(key)) return
-        val candidate = Candidate(url, mimeType, System.currentTimeMillis())
+        val candidate = Candidate(url, mimeType, headers, System.currentTimeMillis())
         found[key] = candidate
         onNewVideo?.invoke(candidate)
     }

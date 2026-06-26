@@ -8,10 +8,18 @@ import android.view.ViewGroup
 import android.webkit.*
 import android.widget.Toast
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.nsl.downloader.databinding.FragmentBrowserBinding
 import com.nsl.downloader.service.DownloadService
+import com.nsl.downloader.service.HlsDownloader
+import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.util.guessTitleFromUrl
+import com.nsl.downloader.util.VideoType
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
 
 class BrowserFragment : Fragment() {
 
@@ -19,6 +27,7 @@ class BrowserFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val sniffer = VideoSniffer()
+    private val probeClient by lazy { OkHttpClient() }
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
@@ -61,7 +70,7 @@ class BrowserFragment : Fragment() {
                 ): WebResourceResponse? {
                     request?.url?.toString()?.let { url ->
                         val mime = request.requestHeaders["Accept"]
-                        sniffer.consider(url, mime)
+                        sniffer.consider(url, mime, request.requestHeaders ?: emptyMap())
                     }
                     return super.shouldInterceptRequest(view, request)
                 }
@@ -143,13 +152,92 @@ class BrowserFragment : Fragment() {
         MaterialAlertDialogBuilder(requireContext())
             .setTitle("Detected videos")
             .setItems(labels) { _, which ->
-                val chosen = videos[which]
-                val pageTitle = binding.webView.title ?: guessTitleFromUrl(chosen.url)
-                DownloadService.start(requireContext(), chosen.url, pageTitle)
-                Toast.makeText(requireContext(), "Download started", Toast.LENGTH_SHORT).show()
+                onVideoChosen(videos[which])
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun onVideoChosen(candidate: VideoSniffer.Candidate) {
+        val pageTitle = binding.webView.title ?: guessTitleFromUrl(candidate.url)
+        val headers = buildHeaders(candidate.url, candidate.headers)
+
+        // Only HLS exposes resolution variants; direct/DASH download straight away.
+        if (detectVideoType(candidate.url) != VideoType.HLS) {
+            startDownload(candidate.url, pageTitle, headers)
+            return
+        }
+
+        Toast.makeText(requireContext(), "Reading qualities…", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val variants = withContext(Dispatchers.IO) {
+                runCatching { HlsDownloader(probeClient).listVariants(candidate.url, headers) }
+                    .getOrDefault(emptyList())
+            }
+            if (!isAdded) return@launch
+            showQualityDialog(candidate.url, pageTitle, variants, headers)
+        }
+    }
+
+    private fun showQualityDialog(
+        playlistUrl: String,
+        title: String,
+        variants: List<HlsDownloader.Variant>,
+        headers: HashMap<String, String>
+    ) {
+        // Single/unknown quality → no choice to make.
+        val real = variants.filter { it.height > 0 }
+        if (real.size <= 1) {
+            startDownload(playlistUrl, title, headers)
+            return
+        }
+        val sorted = real.sortedByDescending { it.height }
+        val labels = sorted.map { v ->
+            val bw = if (v.bandwidth > 0) " • ${v.bandwidth / 1000} kbps" else ""
+            "${v.height}p$bw"
+        }.toTypedArray()
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Select quality")
+            .setItems(labels) { _, which ->
+                val v = sorted[which]
+                startDownload(v.url, "$title (${v.height}p)", headers)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun startDownload(url: String, title: String, headers: HashMap<String, String>) {
+        DownloadService.start(requireContext(), url, title, headers)
+        Toast.makeText(requireContext(), "Download started", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Builds the request headers a CDN expects so protected streams (e.g. missav)
+     * don't return 403: the WebView's User-Agent, the page URL as Referer/Origin,
+     * the request headers the WebView itself used, and the current cookies.
+     */
+    private fun buildHeaders(videoUrl: String, captured: Map<String, String>): HashMap<String, String> {
+        val h = HashMap<String, String>()
+        // Headers the WebView sent for this resource (often includes Referer/Origin).
+        captured.forEach { (k, v) -> if (v.isNotBlank()) h[k] = v }
+        // Always use the real browser UA.
+        h["User-Agent"] = binding.webView.settings.userAgentString
+        // Referer/Origin from the current page if not already captured.
+        binding.webView.url?.let { page ->
+            h.getOrPut("Referer") { page }
+            runCatching {
+                val u = android.net.Uri.parse(page)
+                h.getOrPut("Origin") { "${u.scheme}://${u.host}" }
+            }
+        }
+        // Session cookies for the video host.
+        runCatching {
+            CookieManager.getInstance().getCookie(videoUrl)?.takeIf { it.isNotBlank() }?.let {
+                h["Cookie"] = it
+            }
+        }
+        return h
     }
 
     fun onBackPressed(): Boolean {

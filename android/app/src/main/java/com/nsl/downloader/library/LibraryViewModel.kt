@@ -4,20 +4,26 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.nsl.downloader.data.AppDatabase
+import com.nsl.downloader.data.DownloadProgressBus
 import com.nsl.downloader.data.VideoEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+
+/** A library entry plus its live download progress (null when not downloading). */
+data class VideoRow(val video: VideoEntity, val progress: DownloadProgressBus.Info?)
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private val dao = AppDatabase.getInstance(app).videoDao()
 
-    val videos = dao.observeAll().stateIn(
-        viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
-    )
+    /** The list merged with live per-item progress from the download service. */
+    val rows = combine(dao.observeAll(), DownloadProgressBus.state) { list, progress ->
+        list.map { VideoRow(it, progress[it.id]) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /** Remove a single video and ALL its files (video + thumbnail). */
     fun removeVideo(video: VideoEntity) {

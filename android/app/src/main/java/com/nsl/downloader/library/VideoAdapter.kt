@@ -1,6 +1,7 @@
 package com.nsl.downloader.library
 
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
@@ -16,12 +17,12 @@ import java.util.Locale
 class VideoAdapter(
     private val onClick: (VideoEntity) -> Unit,
     private val onDelete: (VideoEntity) -> Unit
-) : ListAdapter<VideoEntity, VideoAdapter.VH>(DIFF) {
+) : ListAdapter<VideoRow, VideoAdapter.VH>(DIFF) {
 
     companion object {
-        val DIFF = object : DiffUtil.ItemCallback<VideoEntity>() {
-            override fun areItemsTheSame(a: VideoEntity, b: VideoEntity) = a.id == b.id
-            override fun areContentsTheSame(a: VideoEntity, b: VideoEntity) = a == b
+        val DIFF = object : DiffUtil.ItemCallback<VideoRow>() {
+            override fun areItemsTheSame(a: VideoRow, b: VideoRow) = a.video.id == b.video.id
+            override fun areContentsTheSame(a: VideoRow, b: VideoRow) = a == b
         }
         private val dateFmt = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
     }
@@ -36,7 +37,8 @@ class VideoAdapter(
     }
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        val video = getItem(position)
+        val row = getItem(position)
+        val video = row.video
         with(holder.binding) {
             title.text = video.title
             subtitle.text = buildString {
@@ -47,23 +49,43 @@ class VideoAdapter(
                 }
             }
 
+            // Default: hide progress UI.
+            progressBar.visibility = View.GONE
+
             when (video.status) {
                 DownloadStatus.COMPLETED -> {
-                    statusBadge.visibility = android.view.View.GONE
+                    statusBadge.visibility = View.GONE
                     root.alpha = 1f
                 }
                 DownloadStatus.DOWNLOADING -> {
-                    statusBadge.visibility = android.view.View.VISIBLE
-                    statusBadge.text = "Downloading…"
-                    root.alpha = 0.6f
+                    root.alpha = 0.85f
+                    statusBadge.visibility = View.VISIBLE
+                    val p = row.progress
+                    if (p != null) {
+                        progressBar.visibility = View.VISIBLE
+                        if (p.percent in 0..100) {
+                            progressBar.isIndeterminate = false
+                            progressBar.progress = p.percent
+                            statusBadge.text = buildString {
+                                append("${p.percent}%")
+                                if (p.bytesPerSec > 0) append(" • ${formatSpeed(p.bytesPerSec)}")
+                            }
+                        } else {
+                            progressBar.isIndeterminate = true
+                            statusBadge.text = if (p.bytesPerSec > 0)
+                                "Downloading… • ${formatSpeed(p.bytesPerSec)}" else "Downloading…"
+                        }
+                    } else {
+                        statusBadge.text = "Downloading…"
+                    }
                 }
                 DownloadStatus.FAILED -> {
-                    statusBadge.visibility = android.view.View.VISIBLE
+                    statusBadge.visibility = View.VISIBLE
                     statusBadge.text = "Failed"
                     root.alpha = 0.6f
                 }
                 DownloadStatus.PENDING -> {
-                    statusBadge.visibility = android.view.View.VISIBLE
+                    statusBadge.visibility = View.VISIBLE
                     statusBadge.text = "Pending"
                     root.alpha = 0.6f
                 }
@@ -92,6 +114,15 @@ class VideoAdapter(
             gb >= 1 -> String.format(Locale.US, "%.1f GB", gb)
             mb >= 1 -> String.format(Locale.US, "%.1f MB", mb)
             else -> String.format(Locale.US, "%.0f KB", kb)
+        }
+    }
+
+    private fun formatSpeed(bps: Long): String {
+        val kb = bps / 1024.0
+        val mb = kb / 1024.0
+        return when {
+            mb >= 1 -> String.format(Locale.US, "%.1f MB/s", mb)
+            else -> String.format(Locale.US, "%.0f KB/s", kb)
         }
     }
 }

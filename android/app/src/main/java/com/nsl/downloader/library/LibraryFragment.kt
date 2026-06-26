@@ -42,7 +42,7 @@ class LibraryFragment : Fragment() {
         binding.btnRemoveAll.setOnClickListener { confirmRemoveAll() }
 
         viewLifecycleOwner.lifecycleScope.launch {
-            viewModel.videos.collectLatest { list ->
+            viewModel.rows.collectLatest { list ->
                 adapter.submitList(list)
                 binding.emptyView.visibility =
                     if (list.isEmpty()) View.VISIBLE else View.GONE

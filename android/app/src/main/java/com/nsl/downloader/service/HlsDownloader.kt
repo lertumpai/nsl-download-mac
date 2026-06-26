@@ -3,7 +3,6 @@ package com.nsl.downloader.service
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.io.OutputStream
 import java.net.URI
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -11,72 +10,118 @@ import javax.crypto.spec.SecretKeySpec
 
 /**
  * Downloads an HLS (.m3u8) stream without ffmpeg:
- *  - resolves a master playlist to its highest-bandwidth variant
+ *  - lists the resolution variants of a master playlist (for quality selection)
  *  - parses the media playlist for segment URIs
  *  - supports AES-128 segment decryption (#EXT-X-KEY)
  *  - concatenates decrypted TS segments into a single playable .ts file
  *
- * This covers the large majority of unencrypted and AES-128 HLS streams.
- * It does not handle SAMPLE-AES (FairPlay/Widevine) DRM.
+ * All requests forward caller-supplied headers (User-Agent / Referer / Cookie)
+ * so CDN-protected streams (e.g. missav) don't 403.
+ *
+ * Does not handle SAMPLE-AES (FairPlay/Widevine) DRM.
  */
 class HlsDownloader(private val client: OkHttpClient) {
 
     data class Segment(val url: String, val key: ByteArray?, val iv: ByteArray?, val seq: Int)
 
-    /** @return true on success. onProgress is 0..100. */
-    fun download(playlistUrl: String, output: File, onProgress: (Int) -> Unit): Boolean {
-        val mediaUrl = resolveVariant(playlistUrl) ?: playlistUrl
-        val segments = parseMediaPlaylist(mediaUrl) ?: return false
-        if (segments.isEmpty()) return false
+    /** A selectable quality from a master playlist. */
+    data class Variant(
+        val url: String,
+        val width: Int,
+        val height: Int,
+        val bandwidth: Long
+    )
 
-        output.outputStream().use { out ->
-            segments.forEachIndexed { index, seg ->
-                val data = fetchBytes(seg.url) ?: return false
-                val decoded = if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
-                out.write(decoded)
-                onProgress(((index + 1) * 100) / segments.size)
-            }
+    /**
+     * Returns the selectable qualities for [playlistUrl].
+     * If it is a master playlist, one [Variant] per #EXT-X-STREAM-INF (sorted by
+     * height desc). If it is already a media playlist (single quality), returns a
+     * single variant pointing at it with height 0 (unknown).
+     */
+    fun listVariants(playlistUrl: String, headers: Map<String, String>): List<Variant> {
+        val text = fetchText(playlistUrl, headers)
+            ?: return listOf(Variant(playlistUrl, 0, 0, 0))
+        if (!text.contains("#EXT-X-STREAM-INF")) {
+            // Already a media playlist — single quality.
+            return listOf(Variant(playlistUrl, 0, 0, 0))
         }
-        return output.length() > 0
-    }
-
-    private fun fetchText(url: String): String? = runCatching {
-        client.newCall(Request.Builder().url(url).build()).execute().use { r ->
-            if (!r.isSuccessful) null else r.body?.string()
-        }
-    }.getOrNull()
-
-    private fun fetchBytes(url: String): ByteArray? = runCatching {
-        client.newCall(Request.Builder().url(url).build()).execute().use { r ->
-            if (!r.isSuccessful) null else r.body?.bytes()
-        }
-    }.getOrNull()
-
-    /** If the playlist is a master, return the highest-bandwidth variant URL. */
-    private fun resolveVariant(masterUrl: String): String? {
-        val text = fetchText(masterUrl) ?: return null
-        if (!text.contains("#EXT-X-STREAM-INF")) return masterUrl // already a media playlist
         val lines = text.lines()
-        var bestBandwidth = -1L
-        var bestUri: String? = null
+        val variants = mutableListOf<Variant>()
         var i = 0
         while (i < lines.size) {
             val line = lines[i].trim()
             if (line.startsWith("#EXT-X-STREAM-INF")) {
                 val bw = Regex("BANDWIDTH=(\\d+)").find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val res = Regex("RESOLUTION=(\\d+)x(\\d+)").find(line)
+                val w = res?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val h = res?.groupValues?.get(2)?.toIntOrNull() ?: 0
                 val uri = lines.getOrNull(i + 1)?.trim()
-                if (uri != null && uri.isNotEmpty() && !uri.startsWith("#") && bw > bestBandwidth) {
-                    bestBandwidth = bw
-                    bestUri = uri
+                if (!uri.isNullOrEmpty() && !uri.startsWith("#")) {
+                    variants.add(Variant(resolveUrl(playlistUrl, uri), w, h, bw))
                 }
                 i += 2
             } else i++
         }
-        return bestUri?.let { resolveUrl(masterUrl, it) }
+        if (variants.isEmpty()) return listOf(Variant(playlistUrl, 0, 0, 0))
+        return variants.sortedByDescending { if (it.height > 0) it.height.toLong() else it.bandwidth }
     }
 
-    private fun parseMediaPlaylist(mediaUrl: String): List<Segment>? {
-        val text = fetchText(mediaUrl) ?: return null
+    /**
+     * Downloads the media playlist at [mediaUrl] (already a chosen variant) into [output].
+     * @return true on success. onProgress reports (percent 0..100, total bytes written).
+     */
+    fun download(
+        mediaUrl: String,
+        output: File,
+        headers: Map<String, String>,
+        onProgress: (Int, Long) -> Unit
+    ): Boolean {
+        // mediaUrl may still be a master (if caller passed the raw URL); resolve it.
+        val resolved = if (isMaster(mediaUrl, headers)) {
+            listVariants(mediaUrl, headers).firstOrNull()?.url ?: mediaUrl
+        } else mediaUrl
+
+        val segments = parseMediaPlaylist(resolved, headers) ?: return false
+        if (segments.isEmpty()) return false
+
+        var written = 0L
+        output.outputStream().use { out ->
+            segments.forEachIndexed { index, seg ->
+                val data = fetchBytes(seg.url, headers) ?: return false
+                val decoded = if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
+                out.write(decoded)
+                written += decoded.size
+                onProgress(((index + 1) * 100) / segments.size, written)
+            }
+        }
+        return output.length() > 0
+    }
+
+    private fun isMaster(url: String, headers: Map<String, String>): Boolean {
+        val text = fetchText(url, headers) ?: return false
+        return text.contains("#EXT-X-STREAM-INF")
+    }
+
+    private fun buildRequest(url: String, headers: Map<String, String>): Request {
+        val b = Request.Builder().url(url)
+        headers.forEach { (k, v) -> if (v.isNotBlank()) b.header(k, v) }
+        return b.build()
+    }
+
+    private fun fetchText(url: String, headers: Map<String, String>): String? = runCatching {
+        client.newCall(buildRequest(url, headers)).execute().use { r ->
+            if (!r.isSuccessful) null else r.body?.string()
+        }
+    }.getOrNull()
+
+    private fun fetchBytes(url: String, headers: Map<String, String>): ByteArray? = runCatching {
+        client.newCall(buildRequest(url, headers)).execute().use { r ->
+            if (!r.isSuccessful) null else r.body?.bytes()
+        }
+    }.getOrNull()
+
+    private fun parseMediaPlaylist(mediaUrl: String, headers: Map<String, String>): List<Segment>? {
+        val text = fetchText(mediaUrl, headers) ?: return null
         val lines = text.lines()
         val segments = mutableListOf<Segment>()
 
@@ -99,7 +144,7 @@ class HlsDownloader(private val client: OkHttpClient) {
                         currentIv = null
                     } else if (method == "AES-128") {
                         val keyUri = Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
-                        currentKey = keyUri?.let { fetchBytes(resolveUrl(mediaUrl, it)) }
+                        currentKey = keyUri?.let { fetchBytes(resolveUrl(mediaUrl, it), headers) }
                         val ivHex = Regex("IV=0x([0-9A-Fa-f]+)").find(line)?.groupValues?.get(1)
                         currentIv = ivHex?.let { hexToBytes(it) }
                     }
