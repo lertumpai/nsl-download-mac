@@ -42,11 +42,13 @@ class VideoAdapter(
         with(holder.binding) {
             title.text = video.title
             subtitle.text = buildString {
-                append(dateFmt.format(Date(video.downloadedAt)))
+                if (video.durationMs > 0) append(formatDuration(video.durationMs))
                 if (video.fileSizeBytes > 0) {
-                    append(" • ")
+                    if (isNotEmpty()) append(" • ")
                     append(formatSize(video.fileSizeBytes))
                 }
+                if (isNotEmpty()) append(" • ")
+                append(dateFmt.format(Date(video.downloadedAt)))
             }
 
             // Default: hide progress UI.
@@ -115,6 +117,15 @@ class VideoAdapter(
             mb >= 1 -> String.format(Locale.US, "%.1f MB", mb)
             else -> String.format(Locale.US, "%.0f KB", kb)
         }
+    }
+
+    private fun formatDuration(ms: Long): String {
+        val totalSec = ms / 1000
+        val h = totalSec / 3600
+        val m = (totalSec % 3600) / 60
+        val s = totalSec % 60
+        return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+        else String.format(Locale.US, "%d:%02d", m, s)
     }
 
     private fun formatSpeed(bps: Long): String {

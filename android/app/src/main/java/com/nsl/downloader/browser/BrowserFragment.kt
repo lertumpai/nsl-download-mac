@@ -210,6 +210,8 @@ class BrowserFragment : Fragment() {
     private fun startDownload(url: String, title: String, headers: HashMap<String, String>) {
         DownloadService.start(requireContext(), url, title, headers)
         Toast.makeText(requireContext(), "Download started", Toast.LENGTH_SHORT).show()
+        // Jump to the Library so the user sees the download progressing.
+        (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
     }
 
     /**

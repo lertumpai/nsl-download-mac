@@ -32,8 +32,8 @@
         <activity
             android:name=".player.PlayerActivity"
             android:exported="false"
-            android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:theme="@style/Theme.NSLDownloader.NoActionBar" />
 
         <service

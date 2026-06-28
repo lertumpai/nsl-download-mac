@@ -1,5 +1,9 @@
 package com.nsl.downloader.service
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -21,6 +25,12 @@ import javax.crypto.spec.SecretKeySpec
  * Does not handle SAMPLE-AES (FairPlay/Widevine) DRM.
  */
 class HlsDownloader(private val client: OkHttpClient) {
+
+    companion object {
+        /** Max segments fetched concurrently. */
+        private const val PARALLELISM = 6
+        private const val BUFFER_SIZE = 1 shl 16 // 64 KB
+    }
 
     data class Segment(val url: String, val key: ByteArray?, val iv: ByteArray?, val seq: Int)
 
@@ -68,33 +78,50 @@ class HlsDownloader(private val client: OkHttpClient) {
 
     /**
      * Downloads the media playlist at [mediaUrl] (already a chosen variant) into [output].
+     *
+     * Segments are fetched+decrypted **concurrently** (up to [PARALLELISM] at a time) to
+     * hide per-segment latency, then written to disk **in playlist order** so the result
+     * is a valid contiguous .ts. Memory is bounded to one batch of segments.
+     *
      * @return true on success. onProgress reports (percent 0..100, total bytes written).
      */
-    fun download(
+    suspend fun download(
         mediaUrl: String,
         output: File,
         headers: Map<String, String>,
         onProgress: (Int, Long) -> Unit
-    ): Boolean {
+    ): Boolean = coroutineScope {
         // mediaUrl may still be a master (if caller passed the raw URL); resolve it.
         val resolved = if (isMaster(mediaUrl, headers)) {
             listVariants(mediaUrl, headers).firstOrNull()?.url ?: mediaUrl
         } else mediaUrl
 
-        val segments = parseMediaPlaylist(resolved, headers) ?: return false
-        if (segments.isEmpty()) return false
+        val segments = parseMediaPlaylist(resolved, headers)
+            ?: return@coroutineScope false
+        if (segments.isEmpty()) return@coroutineScope false
 
         var written = 0L
-        output.outputStream().use { out ->
-            segments.forEachIndexed { index, seg ->
-                val data = fetchBytes(seg.url, headers) ?: return false
-                val decoded = if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
-                out.write(decoded)
-                written += decoded.size
-                onProgress(((index + 1) * 100) / segments.size, written)
+        var done = 0
+        output.outputStream().buffered(BUFFER_SIZE).use { out ->
+            // Process in batches so at most PARALLELISM segments are in flight / in memory.
+            for (batch in segments.chunked(PARALLELISM)) {
+                val fetched = batch.map { seg ->
+                    async(Dispatchers.IO) {
+                        val data = fetchBytes(seg.url, headers) ?: return@async null
+                        if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
+                    }
+                }.awaitAll()
+
+                for (bytes in fetched) {
+                    bytes ?: return@coroutineScope false  // a segment failed
+                    out.write(bytes)
+                    written += bytes.size
+                    done++
+                    onProgress(done * 100 / segments.size, written)
+                }
             }
         }
-        return output.length() > 0
+        output.length() > 0
     }
 
     private fun isMaster(url: String, headers: Map<String, String>): Boolean {

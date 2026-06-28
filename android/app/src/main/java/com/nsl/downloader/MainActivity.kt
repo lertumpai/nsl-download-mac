@@ -59,6 +59,11 @@ class MainActivity : AppCompatActivity() {
     private fun isBrowserVisible(): Boolean =
         browserFragment.isVisible
 
+    /** Jump to the Library tab (e.g. right after a download starts). */
+    fun showLibrary() {
+        binding.bottomNav.selectedItemId = R.id.nav_library
+    }
+
     private fun requestNotifPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)

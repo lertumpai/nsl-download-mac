@@ -22,19 +22,27 @@ of any content/streaming type, and **play them back** with a gesture-driven play
   - Direct files → streamed to disk with OkHttp.
   - **HLS** → native downloader (`HlsDownloader`): downloads the chosen variant,
     parses the media playlist, **decrypts AES-128 segments**, and concatenates to a
-    playable `.ts`. No ffmpeg dependency.
-  - DASH/progressive → fetched directly.
+    playable `.ts`. No ffmpeg dependency. Segments are fetched **6-at-a-time
+    concurrently** (then written in playlist order) to hide per-segment latency;
+    OkHttp is tuned for parallel same-host requests.
+  - DASH/progressive → fetched directly (64 KB buffered I/O).
+- **Concurrent downloads** — up to **3 videos download at once** (`MAX_CONCURRENT`), the rest
+  queue. Each shows its own progress; a foreground summary notification counts the active ones.
 - **Live progress & speed** — each downloading item shows a progress bar with **percent and
-  download speed** (e.g. `40% • 721 KB/s`) in the Library, and the same in the notification.
+  download speed** (e.g. `40% • 721 KB/s`) in the Library, and a per-download notification.
   Progress is published through an in-memory `DownloadProgressBus` (not Room, to avoid disk
   churn) and merged with the list via `combine()`.
+- **Rich list rows** — each entry shows **duration • size • date** (e.g. `0:09 • 2.5 MB • Jun 26`)
+  plus a real video thumbnail. Duration is probed with `MediaMetadataRetriever` after download.
+- **Jump-to-Library** — starting a download switches to the Library tab so it's immediately visible.
 - **Library tab** — Room-backed list with auto-generated video thumbnails (Glide), title,
   size and date.
   - **Delete one** — trash icon → confirm → removes the DB row **and the file(s)**.
   - **Remove all** — wipes every entry and the whole `downloads/` directory.
 - **Chrome-less UI** — no action bar; the browser address bar / library header sit directly
   under the status bar (insets handled via `fitsSystemWindows`).
-- **Player** (`PlayerActivity`, ExoPlayer/Media3, landscape):
+- **Player** (`PlayerActivity`, ExoPlayer/Media3, **portrait or landscape** — `fullUser`,
+  rotates without interrupting playback):
   - **Swipe left / right** = **−10s / +10s**.
   - On-screen **−10s / +10s** buttons.
   - Double-tap left/right half also seeks ∓10s. Visual "+10s ⏩ / ⏪ −10s" feedback flash.
