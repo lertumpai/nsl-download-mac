@@ -96,15 +96,19 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun setupButtons() {
-        binding.btnMinus10.setOnClickListener { seekBy(-SEEK_MS) }
-        binding.btnPlus10.setOnClickListener { seekBy(SEEK_MS) }
+        binding.btnMinus10.setOnClickListener { seekTo(-SEEK_MS) }
+        binding.btnPlus10.setOnClickListener { seekTo(SEEK_MS) }
         binding.btnClose.setOnClickListener { finish() }
     }
 
-    private fun seekBy(deltaMs: Long) {
+    private fun seekTo(deltaMs: Long) {
         val p = player ?: return
         val target = (p.currentPosition + deltaMs).coerceIn(0, p.duration.coerceAtLeast(0))
         p.seekTo(target)
+    }
+
+    private fun seekBy(deltaMs: Long) {
+        seekTo(deltaMs)
         showSeekFeedback(deltaMs)
     }
 

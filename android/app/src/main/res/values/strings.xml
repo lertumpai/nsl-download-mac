@@ -16,4 +16,8 @@
     <string name="thumbnail">Thumbnail</string>
     <string name="minus_10">-10s</string>
     <string name="plus_10">+10s</string>
+    <string name="show_folder">Show in folder</string>
+    <string name="tab_new">New tab</string>
+    <string name="tabs">Tabs</string>
+    <string name="new_tab">New Tab</string>
 </resources>

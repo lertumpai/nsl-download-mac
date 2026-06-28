@@ -5,6 +5,8 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
@@ -15,6 +17,7 @@ import com.nsl.downloader.databinding.FragmentLibraryBinding
 import com.nsl.downloader.player.PlayerActivity
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.io.File
 
 class LibraryFragment : Fragment() {
 
@@ -24,7 +27,8 @@ class LibraryFragment : Fragment() {
 
     private val adapter = VideoAdapter(
         onClick = { openPlayer(it) },
-        onDelete = { confirmDeleteSingle(it) }
+        onDelete = { confirmDeleteSingle(it) },
+        onShare = { openFile(it) }
     )
 
     override fun onCreateView(
@@ -67,6 +71,35 @@ class LibraryFragment : Fragment() {
             .setPositiveButton("Remove") { _, _ -> viewModel.removeVideo(video) }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun openFile(video: VideoEntity) {
+        val file = File(video.localPath)
+        if (!file.exists()) {
+            Toast.makeText(requireContext(), "File not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uri = FileProvider.getUriForFile(
+            requireContext(),
+            "${requireContext().packageName}.fileprovider",
+            file
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(intent, "Open with…")
+        if (intent.resolveActivity(requireContext().packageManager) != null) {
+            startActivity(chooser)
+        } else {
+            // Fallback: share
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "video/*"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Share video"))
+        }
     }
 
     private fun confirmRemoveAll() {

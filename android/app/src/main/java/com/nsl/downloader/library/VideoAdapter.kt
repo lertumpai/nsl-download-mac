@@ -16,7 +16,8 @@ import java.util.Locale
 
 class VideoAdapter(
     private val onClick: (VideoEntity) -> Unit,
-    private val onDelete: (VideoEntity) -> Unit
+    private val onDelete: (VideoEntity) -> Unit,
+    private val onShare: (VideoEntity) -> Unit
 ) : ListAdapter<VideoRow, VideoAdapter.VH>(DIFF) {
 
     companion object {
@@ -99,6 +100,13 @@ class VideoAdapter(
                     .into(thumbnail)
             } else {
                 thumbnail.setImageResource(android.R.drawable.ic_media_play)
+            }
+
+            if (video.status == DownloadStatus.COMPLETED && video.localPath.isNotBlank()) {
+                btnShare.visibility = View.VISIBLE
+                btnShare.setOnClickListener { onShare(video) }
+            } else {
+                btnShare.visibility = View.GONE
             }
 
             root.setOnClickListener {
