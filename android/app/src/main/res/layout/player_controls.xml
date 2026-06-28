@@ -1,23 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
+<FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:background="#BB000000"
-    android:paddingBottom="8dp">
+    android:layout_height="match_parent">
 
-    <!-- Scrub thumbnail preview -->
+    <!-- ±10s buttons: centered over the video -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="horizontal"
+        android:gravity="center">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnMinus10"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="24dp"
+            android:text="@string/minus_10"
+            app:icon="@android:drawable/ic_media_rew" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPlus10"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/plus_10"
+            app:icon="@android:drawable/ic_media_ff" />
+    </LinearLayout>
+
+    <!-- Scrub thumbnail: floats above the bottom bar when scrubbing -->
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/seekThumbnailCard"
         android:layout_width="160dp"
         android:layout_height="90dp"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginBottom="8dp"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="160dp"
         android:visibility="gone"
-        app:cardElevation="4dp"
-        app:cardCornerRadius="4dp">
+        app:cardElevation="6dp"
+        app:cardCornerRadius="6dp">
 
         <ImageView
             android:id="@+id/seekThumbnail"
@@ -27,60 +50,102 @@
             android:contentDescription="@null"/>
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- Seekbar row -->
+    <!-- Bottom bar: seekbar + play/pause + footer (title + close) -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:paddingHorizontal="8dp">
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:background="#BB000000"
+        android:paddingBottom="4dp">
 
-        <TextView
-            android:id="@+id/exo_position"
-            android:layout_width="wrap_content"
+        <!-- Seekbar row -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
-            android:minWidth="52dp"
-            android:gravity="end"/>
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="8dp">
 
-        <androidx.media3.ui.DefaultTimeBar
-            android:id="@+id/exo_progress"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginHorizontal="4dp"
-            app:bar_height="6dp"
-            app:touch_target_height="48dp"
-            app:played_color="#FFFFFFFF"
-            app:unplayed_color="#55FFFFFF"
-            app:buffered_color="#99FFFFFF"
-            app:scrubber_color="#FFFFFFFF"
-            app:scrubber_enabled_size="14dp"
-            app:scrubber_dragged_size="22dp"/>
+            <TextView
+                android:id="@+id/exo_position"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#FFFFFFFF"
+                android:textSize="12sp"
+                android:minWidth="52dp"
+                android:gravity="end"/>
 
-        <TextView
-            android:id="@+id/exo_duration"
-            android:layout_width="wrap_content"
+            <androidx.media3.ui.DefaultTimeBar
+                android:id="@+id/exo_progress"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginHorizontal="4dp"
+                app:bar_height="6dp"
+                app:touch_target_height="48dp"
+                app:played_color="#FFFFFFFF"
+                app:unplayed_color="#55FFFFFF"
+                app:buffered_color="#99FFFFFF"
+                app:scrubber_color="#FFFFFFFF"
+                app:scrubber_enabled_size="14dp"
+                app:scrubber_dragged_size="22dp"/>
+
+            <TextView
+                android:id="@+id/exo_duration"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#FFFFFFFF"
+                android:textSize="12sp"
+                android:minWidth="52dp"
+                android:gravity="start"/>
+        </LinearLayout>
+
+        <!-- Play/pause row -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="48dp">
+
+            <ImageButton
+                android:id="@+id/exo_play_pause"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_gravity="center"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@null"/>
+        </FrameLayout>
+
+        <!-- Footer: title on the left, close button on the right -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFFFF"
-            android:textSize="12sp"
-            android:minWidth="52dp"
-            android:gravity="start"/>
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp">
+
+            <TextView
+                android:id="@+id/titleText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp"
+                android:shadowColor="#000000"
+                android:shadowRadius="6"
+                android:ellipsize="end"
+                android:maxLines="1" />
+
+            <ImageButton
+                android:id="@+id/btnClose"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:contentDescription="@string/close" />
+        </LinearLayout>
+
     </LinearLayout>
 
-    <!-- Play/pause row -->
-    <FrameLayout
-        android:layout_width="match_parent"
-        android:layout_height="48dp">
-
-        <ImageButton
-            android:id="@+id/exo_play_pause"
-            android:layout_width="48dp"
-            android:layout_height="48dp"
-            android:layout_gravity="center"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@null"/>
-    </FrameLayout>
-
-</LinearLayout>
+</FrameLayout>

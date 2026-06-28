@@ -57,10 +57,9 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
-        binding.titleText.text = title
         setupPlayer(videoPath!!)
         setupGestures()
-        setupButtons()
+        setupButtons(title)
         setupThumbnailPreview()
     }
 
@@ -155,10 +154,11 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupButtons() {
-        binding.btnMinus10.setOnClickListener { seekTo(-SEEK_MS) }
-        binding.btnPlus10.setOnClickListener { seekTo(SEEK_MS) }
-        binding.btnClose.setOnClickListener { finish() }
+    private fun setupButtons(title: String) {
+        binding.playerView.findViewById<android.widget.TextView>(R.id.titleText)?.text = title
+        binding.playerView.findViewById<View>(R.id.btnMinus10)?.setOnClickListener { seekTo(-SEEK_MS) }
+        binding.playerView.findViewById<View>(R.id.btnPlus10)?.setOnClickListener { seekTo(SEEK_MS) }
+        binding.playerView.findViewById<View>(R.id.btnClose)?.setOnClickListener { finish() }
     }
 
     private fun seekTo(deltaMs: Long) {

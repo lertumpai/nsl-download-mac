@@ -102,6 +102,17 @@ class BrowserFragment : Fragment() {
                     return true
                 }
             }
+            wv.setOnLongClickListener {
+                val hit = wv.hitTestResult
+                val url = hit.extra
+                if (hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE && !url.isNullOrEmpty()) {
+                    addNewTab(url)
+                    Toast.makeText(requireContext(), "Opened in new tab", Toast.LENGTH_SHORT).show()
+                    true
+                } else {
+                    false
+                }
+            }
             sniffer.onNewVideo = {
                 if (this === currentTab) {
                     requireActivity().runOnUiThread { updateFab() }
