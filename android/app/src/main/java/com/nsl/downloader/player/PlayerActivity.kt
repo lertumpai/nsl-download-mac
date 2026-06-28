@@ -1,21 +1,33 @@
 package com.nsl.downloader.player
 
 import android.annotation.SuppressLint
+import android.media.MediaMetadataRetriever
 import android.os.Bundle
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.DefaultTimeBar
+import androidx.media3.ui.TimeBar
+import com.nsl.downloader.R
+import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.databinding.ActivityPlayerBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 class PlayerActivity : AppCompatActivity() {
 
     companion object {
+        const val EXTRA_ID = "video_id"
         const val EXTRA_PATH = "video_path"
         const val EXTRA_TITLE = "video_title"
         const val SEEK_MS = 10_000L
@@ -25,24 +37,31 @@ class PlayerActivity : AppCompatActivity() {
     private var player: ExoPlayer? = null
     private lateinit var gestureDetector: GestureDetector
 
+    private var videoId: Long = -1L
+    private var videoPath: String? = null
+    private var thumbnailJob: Job? = null
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityPlayerBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        val path = intent.getStringExtra(EXTRA_PATH)
+        videoId = intent.getLongExtra(EXTRA_ID, -1L)
+        videoPath = intent.getStringExtra(EXTRA_PATH)
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "Video"
-        if (path == null) {
+
+        if (videoPath == null) {
             Toast.makeText(this, "No video path", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
 
         binding.titleText.text = title
-        setupPlayer(path)
+        setupPlayer(videoPath!!)
         setupGestures()
         setupButtons()
+        setupThumbnailPreview()
     }
 
     private fun setupPlayer(path: String) {
@@ -56,9 +75,54 @@ class PlayerActivity : AppCompatActivity() {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) {
                         binding.playerView.showController()
+                        savePosition(0L)
                     }
                 }
             })
+        }
+
+        // Restore last playback position
+        if (videoId != -1L) {
+            lifecycleScope.launch {
+                val lastPos = withContext(Dispatchers.IO) {
+                    AppDatabase.getInstance(this@PlayerActivity).videoDao().getById(videoId)?.lastPositionMs ?: 0L
+                }
+                if (lastPos > 0L) player?.seekTo(lastPos)
+            }
+        }
+    }
+
+    private fun setupThumbnailPreview() {
+        val timeBar = binding.playerView.findViewById<DefaultTimeBar>(R.id.exo_progress) ?: return
+        val card = binding.playerView.findViewById<View>(R.id.seekThumbnailCard) ?: return
+        val image = binding.playerView.findViewById<android.widget.ImageView>(R.id.seekThumbnail) ?: return
+
+        timeBar.addListener(object : TimeBar.OnScrubListener {
+            override fun onScrubStart(timeBar: TimeBar, position: Long) = showThumbnail(position, card, image)
+            override fun onScrubMove(timeBar: TimeBar, position: Long) = showThumbnail(position, card, image)
+            override fun onScrubStop(timeBar: TimeBar, position: Long, cancelled: Boolean) {
+                thumbnailJob?.cancel()
+                card.visibility = View.GONE
+            }
+        })
+    }
+
+    private fun showThumbnail(positionMs: Long, card: View, image: android.widget.ImageView) {
+        thumbnailJob?.cancel()
+        thumbnailJob = lifecycleScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                runCatching {
+                    val retriever = MediaMetadataRetriever()
+                    retriever.setDataSource(videoPath)
+                    val b = retriever.getFrameAtTime(positionMs * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    retriever.release()
+                    b
+                }.getOrNull()
+            }
+            if (isActive && bmp != null) {
+                image.setImageBitmap(bmp)
+                card.visibility = View.VISIBLE
+            }
         }
     }
 
@@ -72,7 +136,6 @@ class PlayerActivity : AppCompatActivity() {
                 if (e1 == null) return false
                 val dx = e2.x - e1.x
                 val dy = e2.y - e1.y
-                // horizontal fling only
                 if (abs(dx) > abs(dy) && abs(dx) > 100) {
                     if (dx > 0) seekBy(SEEK_MS) else seekBy(-SEEK_MS)
                     return true
@@ -81,15 +144,12 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                // double-tap right half = +10, left half = -10
                 if (e.x > binding.playerView.width / 2) seekBy(SEEK_MS)
                 else seekBy(-SEEK_MS)
                 return true
             }
         })
 
-        // Forward touches to the gesture detector; if it doesn't consume the
-        // event, let PlayerView handle it (controller show/hide, seek bar).
         binding.playerView.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
         }
@@ -124,13 +184,25 @@ class PlayerActivity : AppCompatActivity() {
         binding.seekFeedback.visibility = View.GONE
     }
 
+    private fun savePosition(positionMs: Long) {
+        if (videoId == -1L) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val dao = AppDatabase.getInstance(this@PlayerActivity).videoDao()
+            val video = dao.getById(videoId) ?: return@launch
+            dao.update(video.copy(lastPositionMs = positionMs))
+        }
+    }
+
     override fun onPause() {
         super.onPause()
+        val pos = player?.currentPosition ?: 0L
+        savePosition(pos)
         player?.pause()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        thumbnailJob?.cancel()
         player?.release()
         player = null
     }

@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="#BB000000"
+    android:paddingBottom="8dp">
+
+    <!-- Scrub thumbnail preview -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/seekThumbnailCard"
+        android:layout_width="160dp"
+        android:layout_height="90dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone"
+        app:cardElevation="4dp"
+        app:cardCornerRadius="4dp">
+
+        <ImageView
+            android:id="@+id/seekThumbnail"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="centerCrop"
+            android:contentDescription="@null"/>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- Seekbar row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="8dp">
+
+        <TextView
+            android:id="@+id/exo_position"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:minWidth="52dp"
+            android:gravity="end"/>
+
+        <androidx.media3.ui.DefaultTimeBar
+            android:id="@+id/exo_progress"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginHorizontal="4dp"
+            app:bar_height="6dp"
+            app:touch_target_height="48dp"
+            app:played_color="#FFFFFFFF"
+            app:unplayed_color="#55FFFFFF"
+            app:buffered_color="#99FFFFFF"
+            app:scrubber_color="#FFFFFFFF"
+            app:scrubber_enabled_size="14dp"
+            app:scrubber_dragged_size="22dp"/>
+
+        <TextView
+            android:id="@+id/exo_duration"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFFFF"
+            android:textSize="12sp"
+            android:minWidth="52dp"
+            android:gravity="start"/>
+    </LinearLayout>
+
+    <!-- Play/pause row -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="48dp">
+
+        <ImageButton
+            android:id="@+id/exo_play_pause"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="center"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@null"/>
+    </FrameLayout>
+
+</LinearLayout>

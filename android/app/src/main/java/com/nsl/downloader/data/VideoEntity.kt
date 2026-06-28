@@ -13,7 +13,8 @@ data class VideoEntity(
     val durationMs: Long = 0,
     val fileSizeBytes: Long = 0,
     val downloadedAt: Long = System.currentTimeMillis(),
-    val status: DownloadStatus = DownloadStatus.PENDING
+    val status: DownloadStatus = DownloadStatus.PENDING,
+    val lastPositionMs: Long = 0
 )
 
 enum class DownloadStatus { PENDING, DOWNLOADING, COMPLETED, FAILED }
