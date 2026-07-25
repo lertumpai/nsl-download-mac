@@ -334,7 +334,9 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
     formats = buildDisplayFormats(meta.formats || [])
     if (!formats.length) throw new Error('No downloadable formats found')
 
-    const title = pageTitle || meta.title || `playlist_${Date.now()}`
+    // yt-dlp's metadata title is the video's actual YouTube title. Prefer it
+    // over document.title, which often adds a " - YouTube" suffix.
+    const title = meta.title || pageTitle || `playlist_${Date.now()}`
 
     // Find default selection
     const defQuality = settings.defaultQuality || '1080p'
@@ -351,7 +353,9 @@ async function toggleQualityPicker(card, pageURL, pageTitle, forceAnalyse = fals
 function renderFormatList(picker, formats, selectedIdx, title, pageURL) {
   const defFormat = settings.defaultFormat || 'mp4'
   const defAudioFormat = settings.defaultAudioFormat || 'mp3'
-  const defaultFilename = generateDefaultFilename()
+  // Start with the video title so downloads retain the title shown on YouTube.
+  // Users can still edit this field before downloading.
+  const defaultFilename = title
 
   picker.innerHTML = `
     <div class="quality-picker-header">
