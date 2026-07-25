@@ -12,8 +12,8 @@
     "electron-store": "^8.2.0"
   },
   "devDependencies": {
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.lertumpai.downloader",
@@ -22,20 +22,39 @@
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["universal"] },
-        { "target": "zip", "arch": ["universal"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist",
       "extraResources": [
-        { "from": "bin/", "to": "bin/", "filter": ["**/*"] }
+        {
+          "from": "bin/",
+          "to": "bin/",
+          "filter": [
+            "**/*"
+          ]
+        }
       ]
     },
     "dmg": {
       "title": "NSL Downloader",
-      "window": { "width": 540, "height": 380 }
+      "window": {
+        "width": 540,
+        "height": 380
+      }
     },
     "files": [
       "main.js",
