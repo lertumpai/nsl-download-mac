@@ -113,6 +113,24 @@ object BrowserScripts {
     """.trimIndent()
 
     /**
+     * Resumes only the video that was playing when PiP entry began.
+     *
+     * This does not use `currentTime > 0`: a newly-started clip can still be at
+     * zero when Android performs the window handoff. The saved flag also avoids
+     * accidentally starting a video that the user had deliberately paused.
+     */
+    val RESUME_PIP_MEDIA = """
+    (function () {
+      var video = window.__nslPipVideo;
+      if (!video || !window.__nslPipWasPlaying || video.ended || !video.paused) return;
+      try {
+        var play = video.play();
+        if (play && play.catch) play.catch(function () {});
+      } catch (e) {}
+    })();
+    """.trimIndent()
+
+    /**
      * Lets the app refuse page-initiated pauses for a while.
      *
      * Sites pause themselves on all sorts of window events, and in a floating
@@ -143,12 +161,13 @@ object BrowserScripts {
         "(function(){ window.__nslBlockPause = $blocked; })();"
 
     /**
-     * Moves the currently playing video directly under the page root and
-     * stretches its real decoder surface over the viewport.
+     * Stretches the currently playing video's real decoder surface over the
+     * viewport without moving the element out of its player.
      *
      * Mirroring a hardware-decoded video through canvas works on the emulator
-     * but several phone WebView implementations return a blank frame. Keeping
-     * the actual video element visible avoids that white/black PiP window.
+     * but several phone WebView implementations return a blank frame. Moving
+     * the element to `<body>` is also unsafe: YouTube and other players observe
+     * that DOM removal and immediately stop playback.
      */
     private fun pipFitScript(height: String) = """
     (function () {
@@ -165,20 +184,10 @@ object BrowserScripts {
       var old = window.__nslPipVideo;
       if (old && old !== video) {
         old.classList.remove('__nsl-pip-video');
-        var oldParent = window.__nslPipVideoParent;
-        var oldNext = window.__nslPipVideoNext;
-        if (oldParent && oldParent.isConnected) {
-          if (oldNext && oldNext.parentNode === oldParent) oldParent.insertBefore(old, oldNext);
-          else oldParent.appendChild(old);
-        }
-        window.__nslPipVideoParent = null;
-        window.__nslPipVideoNext = null;
-      }
-      if (!window.__nslPipVideoParent || old !== video) {
-        window.__nslPipVideoParent = video.parentNode;
-        window.__nslPipVideoNext = video.nextSibling;
       }
       window.__nslPipVideo = video;
+      window.__nslPipWasPlaying =
+        window.__nslPipWasPlaying || (!video.paused && !video.ended);
 
       var style = document.getElementById('__nsl_pip_fit');
       if (!style) {
@@ -190,6 +199,10 @@ object BrowserScripts {
         'html.__nsl-pip-root,body.__nsl-pip-root{' +
           'margin:0!important;padding:0!important;overflow:hidden!important;' +
           'background:#000!important;width:100%!important;height:100%!important}' +
+        '.__nsl-pip-ancestor{' +
+          'display:block!important;visibility:visible!important;opacity:1!important;' +
+          'transform:none!important;overflow:visible!important;clip:auto!important;' +
+          'clip-path:none!important;contain:none!important}' +
         'video.__nsl-pip-video{' +
           'display:block!important;visibility:visible!important;opacity:1!important;' +
           'position:fixed!important;left:0!important;top:0!important;' +
@@ -200,10 +213,22 @@ object BrowserScripts {
 
       document.documentElement.classList.add('__nsl-pip-root');
       if (document.body) document.body.classList.add('__nsl-pip-root');
-      var host = document.body || document.documentElement;
-      if (video.parentNode !== host) host.appendChild(video);
+      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
+        node.classList.remove('__nsl-pip-ancestor');
+      });
+      for (var parent = video.parentElement;
+           parent && parent !== document.body && parent !== document.documentElement;
+           parent = parent.parentElement) {
+        parent.classList.add('__nsl-pip-ancestor');
+      }
       video.classList.add('__nsl-pip-video');
       try { video.setAttribute('playsinline', ''); } catch (e) {}
+      if (window.__nslPipWasPlaying && video.paused) {
+        try {
+          var play = video.play();
+          if (play && play.catch) play.catch(function () {});
+        } catch (e) {}
+      }
       return 'video-ready';
     })();
     """.trimIndent()
@@ -222,22 +247,16 @@ object BrowserScripts {
     val PIP_FIT_OFF = """
     (function () {
       var video = window.__nslPipVideo;
-      if (video) {
-        video.classList.remove('__nsl-pip-video');
-        var parent = window.__nslPipVideoParent;
-        var next = window.__nslPipVideoNext;
-        if (parent && parent.isConnected) {
-          if (next && next.parentNode === parent) parent.insertBefore(video, next);
-          else parent.appendChild(video);
-        }
-      }
+      if (video) video.classList.remove('__nsl-pip-video');
+      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
+        node.classList.remove('__nsl-pip-ancestor');
+      });
       document.documentElement.classList.remove('__nsl-pip-root');
       if (document.body) document.body.classList.remove('__nsl-pip-root');
       var style = document.getElementById('__nsl_pip_fit');
       if (style) style.remove();
       window.__nslPipVideo = null;
-      window.__nslPipVideoParent = null;
-      window.__nslPipVideoNext = null;
+      window.__nslPipWasPlaying = false;
       return 'restored';
     })();
     """.trimIndent()

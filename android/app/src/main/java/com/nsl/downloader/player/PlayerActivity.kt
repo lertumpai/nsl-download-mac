@@ -47,6 +47,7 @@ class PlayerActivity : AppCompatActivity() {
     private var videoId: Long = -1L
     private var videoPath: String? = null
     private var thumbnailJob: Job? = null
+    private var pictureInPictureEntryPending = false
     private val prefs by lazy { Prefs(this) }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -217,13 +218,15 @@ class PlayerActivity : AppCompatActivity() {
         if (player?.isPlaying != true) return
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
 
-        runCatching {
+        pictureInPictureEntryPending = true
+        val entered = runCatching {
             enterPictureInPictureMode(
                 PictureInPictureParams.Builder()
                     .setAspectRatio(currentAspectRatio())
                     .build()
             )
-        }
+        }.getOrDefault(false)
+        if (!entered) pictureInPictureEntryPending = false
     }
 
     /** PiP rejects extreme ratios, so the video's own ratio is clamped. */
@@ -245,6 +248,7 @@ class PlayerActivity : AppCompatActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pictureInPictureEntryPending = false
         // The PiP window is far too small for the transport controls.
         binding.playerView.useController = !isInPictureInPictureMode
         if (isInPictureInPictureMode) binding.playerView.hideController()
@@ -256,13 +260,20 @@ class PlayerActivity : AppCompatActivity() {
         savePosition(pos)
         // In PiP the activity is paused but the window is still on screen, so
         // pausing here would defeat the whole point of the mode.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            (pictureInPictureEntryPending || isInPictureInPictureMode)
+        ) return
         player?.pause()
     }
 
     override fun onStop() {
         super.onStop()
-        // Leaving PiP by dismissing the window stops the activity; release then.
+        // Some Android builds stop the activity during the PiP transition even
+        // though its floating window remains visible. Only pause after the PiP
+        // window has actually gone away.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            (pictureInPictureEntryPending || isInPictureInPictureMode)
+        ) return
         player?.pause()
     }
 

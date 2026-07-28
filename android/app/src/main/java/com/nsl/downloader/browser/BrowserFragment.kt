@@ -244,20 +244,21 @@ class BrowserFragment : Fragment() {
     /**
      * Called just before the activity asks the system for a PiP window.
      *
-     * PiP reparents the activity's render surface. It is important that Chromium
-     * receives the real window-visibility callbacks during that transition;
-     * forcing VISIBLE here leaves some Samsung WebView builds attached to the
-     * old full-screen surface and the PiP window is rendered white.
+     * PiP reparents the activity's render surface. Keep the playing WebView
+     * visible to Chromium throughout that handoff so its decoder is not paused;
+     * the page script separately pins the real video surface into the resized
+     * viewport.
      */
     fun prepareForPictureInPicture(onReady: () -> Unit) {
         pictureInPictureActive = true
         if (!currentTab.isPlaying) {
             tabs.indexOfFirst { it.isPlaying }.takeIf { it >= 0 }?.let { switchToTab(it) }
         }
-        tabs.forEach {
-            it.webView.backgroundPlaybackEnabled = false
+        tabs.forEach { tab ->
+            val keepAlive = tab === currentTab
+            tab.webView.backgroundPlaybackEnabled = keepAlive
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                it.webView.settings.offscreenPreRaster = false
+                tab.webView.settings.offscreenPreRaster = keepAlive
             }
         }
         // Normal browsing deliberately uses a wide overview viewport. In a
@@ -332,6 +333,7 @@ class BrowserFragment : Fragment() {
                 it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
             }
             currentWebView.evaluateJavascript(BrowserScripts.PIP_FIT_ON, null)
+            currentWebView.evaluateJavascript(BrowserScripts.RESUME_PIP_MEDIA, null)
             currentWebView.setBackgroundColor(android.graphics.Color.BLACK)
             binding.root.setBackgroundColor(android.graphics.Color.BLACK)
             // Belt and braces: if the transition still managed to pause the
@@ -368,7 +370,7 @@ class BrowserFragment : Fragment() {
                         // longer resumed; PiP is exactly that state.
                         tab.webView.onResume()
                         tab.webView.resumeTimers()
-                        tab.webView.evaluateJavascript(BrowserScripts.RESUME_MEDIA, null)
+                        tab.webView.evaluateJavascript(BrowserScripts.RESUME_PIP_MEDIA, null)
                     }
                 }
                 currentWebView.invalidate()
