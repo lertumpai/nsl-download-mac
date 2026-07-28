@@ -20,4 +20,14 @@
     <string name="tab_new">New tab</string>
     <string name="tabs">Tabs</string>
     <string name="new_tab">New Tab</string>
+    <string name="menu">Menu</string>
+    <string name="menu_ad_block">Block ads</string>
+    <string name="menu_background_playback">Background playback</string>
+    <string name="ad_block_on">Ad blocking on</string>
+    <string name="ad_block_off">Ad blocking off</string>
+    <string name="background_on">Background playback on</string>
+    <string name="background_off">Background playback off</string>
+    <string name="playback_notification_title">Playing in background</string>
+    <string name="playback_default_title">Browser media</string>
+    <string name="playback_stop">Stop</string>
 </resources>

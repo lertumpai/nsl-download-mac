@@ -2,6 +2,7 @@ package com.nsl.downloader.browser
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.os.Message
 import android.view.LayoutInflater
@@ -9,13 +10,18 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
+import android.widget.PopupMenu
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.nsl.downloader.R
 import com.nsl.downloader.databinding.FragmentBrowserBinding
 import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.service.HlsDownloader
+import com.nsl.downloader.service.PlaybackBus
+import com.nsl.downloader.service.PlaybackService
+import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.util.guessTitleFromUrl
 import com.nsl.downloader.util.VideoType
@@ -30,11 +36,18 @@ class BrowserFragment : Fragment() {
     private val binding get() = _binding!!
 
     private val probeClient by lazy { OkHttpClient() }
+    private val prefs by lazy { Prefs(requireContext()) }
 
     private inner class Tab {
         val sniffer = VideoSniffer()
-        @SuppressLint("SetJavaScriptEnabled")
-        val webView: WebView = WebView(requireContext()).also { wv ->
+
+        /** Whether this tab currently has a playing <video>/<audio>. */
+        var isPlaying = false
+        var mediaTitle = ""
+
+        @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+        val webView: BackgroundWebView = BackgroundWebView(requireContext()).also { wv ->
+            wv.backgroundPlaybackEnabled = prefs.backgroundPlaybackEnabled
             wv.settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
@@ -46,11 +59,21 @@ class BrowserFragment : Fragment() {
                 setSupportMultipleWindows(true)
                 userAgentString = wv.settings.userAgentString.replace("; wv", "")
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // Keeps the offscreen/backgrounded WebView rasterising instead of
+                // being torn down while media plays.
+                wv.settings.offscreenPreRaster = true
+            }
+            wv.addJavascriptInterface(MediaBridge(), "NSLBridge")
             wv.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView?, request: WebResourceRequest?
                 ): WebResourceResponse? {
-                    request?.url?.toString()?.let { url ->
+                    val url = request?.url?.toString()
+                    if (url != null) {
+                        if (prefs.adBlockEnabled && AdBlocker.shouldBlock(url)) {
+                            return AdBlocker.blockedResponse()
+                        }
                         val mime = request.requestHeaders["Accept"]
                         sniffer.consider(url, mime, request.requestHeaders ?: emptyMap())
                     }
@@ -60,6 +83,8 @@ class BrowserFragment : Fragment() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     sniffer.clear()
+                    setPlaying(false, "")
+                    injectBackgroundScript(view)
                     if (this@Tab === currentTab) {
                         binding.urlBar.setText(url)
                         updateFab()
@@ -68,6 +93,8 @@ class BrowserFragment : Fragment() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    injectBackgroundScript(view)
+                    injectAdBlockScript(view)
                     if (this@Tab === currentTab) {
                         binding.progressBar.visibility = View.GONE
                         updateFab()
@@ -76,6 +103,7 @@ class BrowserFragment : Fragment() {
             }
             wv.webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    if (newProgress >= 40) injectAdBlockScript(view)
                     if (this@Tab === currentTab) {
                         binding.progressBar.progress = newProgress
                         binding.progressBar.visibility =
@@ -119,10 +147,39 @@ class BrowserFragment : Fragment() {
                 }
             }
         }
+
+        fun injectBackgroundScript(view: WebView?) {
+            if (!prefs.backgroundPlaybackEnabled) return
+            view?.evaluateJavascript(BrowserScripts.BACKGROUND_PLAYBACK, null)
+        }
+
+        fun injectAdBlockScript(view: WebView?) {
+            if (!prefs.adBlockEnabled) return
+            view?.evaluateJavascript(BrowserScripts.AD_BLOCK_COSMETIC, null)
+        }
+
+        /** Called from the JS bridge (worker thread) and from page transitions. */
+        fun setPlaying(playing: Boolean, title: String) {
+            if (isPlaying == playing) return
+            isPlaying = playing
+            mediaTitle = title
+            syncPlaybackService()
+        }
+
+        /** Bridge exposed to page JS as `NSLBridge`. */
+        inner class MediaBridge {
+            @android.webkit.JavascriptInterface
+            fun onMediaState(playing: Boolean, title: String?) {
+                webView.post { setPlaying(playing, title.orEmpty()) }
+            }
+        }
     }
 
     private val tabs = mutableListOf<Tab>()
     private var currentTabIndex = 0
+    private var playbackServiceRunning = false
+    private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val stopPlaybackRunnable = Runnable { stopPlaybackServiceNow() }
     private val currentTab get() = tabs[currentTabIndex]
     private val currentWebView get() = currentTab.webView
 
@@ -136,7 +193,54 @@ class BrowserFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         setupControls()
+        PlaybackBus.stopRequested = { if (isAdded) pauseAllMedia(notifyService = false) }
         addNewTab("https://www.google.com")
+    }
+
+    /**
+     * Starts/stops the foreground service that keeps the process (and the CPU)
+     * alive so WebView media survives backgrounding and screen-off.
+     */
+    private fun syncPlaybackService() {
+        val ctx = context ?: return
+        val playing = tabs.firstOrNull { it.isPlaying }
+        uiHandler.removeCallbacks(stopPlaybackRunnable)
+        if (playing != null && prefs.backgroundPlaybackEnabled) {
+            val title = playing.mediaTitle.takeIf { it.isNotBlank() }
+                ?: playing.webView.title.orEmpty()
+            PlaybackService.start(ctx, title)
+            playbackServiceRunning = true
+        } else if (playbackServiceRunning) {
+            // Don't tear the service down on every gap: playlists, ad breaks and
+            // quality switches pause for a moment, and a foreground service
+            // cannot be restarted from the background on Android 12+.
+            uiHandler.postDelayed(stopPlaybackRunnable, PLAYBACK_STOP_DELAY_MS)
+        }
+    }
+
+    private fun stopPlaybackServiceNow() {
+        if (!playbackServiceRunning || tabs.any { it.isPlaying }) return
+        playbackServiceRunning = false
+        context?.let { PlaybackService.stop(it) }
+    }
+
+    /**
+     * Pauses every media element in every tab. When the notification's "Stop"
+     * action triggers this the service is already tearing itself down, so
+     * [notifyService] is false — otherwise we'd bounce a stop back at it.
+     */
+    private fun pauseAllMedia(notifyService: Boolean) {
+        uiHandler.removeCallbacks(stopPlaybackRunnable)
+        if (!notifyService) playbackServiceRunning = false
+        val js = "document.querySelectorAll('video,audio').forEach(function(m){m.pause();});"
+        tabs.forEach { tab ->
+            tab.webView.evaluateJavascript(js, null)
+            tab.setPlaying(false, "")
+        }
+        if (notifyService) {
+            uiHandler.removeCallbacks(stopPlaybackRunnable)
+            stopPlaybackServiceNow()
+        }
     }
 
     private fun addNewTab(url: String = "https://www.google.com") {
@@ -162,6 +266,7 @@ class BrowserFragment : Fragment() {
     private fun closeTab(index: Int) {
         if (tabs.size <= 1) return
         val tab = tabs.removeAt(index)
+        tab.setPlaying(false, "")
         binding.webViewContainer.removeView(tab.webView)
         tab.webView.destroy()
         val newIndex = if (index >= tabs.size) tabs.size - 1 else index
@@ -194,7 +299,7 @@ class BrowserFragment : Fragment() {
             navigateTo(binding.urlBar.text.toString())
             true
         }
-        binding.btnGo.setOnClickListener { navigateTo(binding.urlBar.text.toString()) }
+        binding.btnMenu.setOnClickListener { showMenu(it) }
         binding.btnBack.setOnClickListener {
             if (currentWebView.canGoBack()) currentWebView.goBack()
         }
@@ -206,6 +311,42 @@ class BrowserFragment : Fragment() {
         binding.btnTabCount.setOnClickListener { showTabSwitcher() }
         binding.fabDownload.setOnClickListener { showVideoPicker() }
     }
+
+    /** Overflow menu: ad block + background playback toggles. */
+    private fun showMenu(anchor: View) {
+        val popup = PopupMenu(requireContext(), anchor)
+        popup.menu.add(0, MENU_AD_BLOCK, 0, getString(R.string.menu_ad_block)).apply {
+            isCheckable = true
+            isChecked = prefs.adBlockEnabled
+        }
+        popup.menu.add(0, MENU_BACKGROUND, 1, getString(R.string.menu_background_playback)).apply {
+            isCheckable = true
+            isChecked = prefs.backgroundPlaybackEnabled
+        }
+        popup.menu.add(0, MENU_NEW_TAB, 2, getString(R.string.tab_new))
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_AD_BLOCK -> {
+                    prefs.adBlockEnabled = !prefs.adBlockEnabled
+                    toast(if (prefs.adBlockEnabled) R.string.ad_block_on else R.string.ad_block_off)
+                    currentWebView.reload()
+                }
+                MENU_BACKGROUND -> {
+                    val enabled = !prefs.backgroundPlaybackEnabled
+                    prefs.backgroundPlaybackEnabled = enabled
+                    tabs.forEach { it.webView.backgroundPlaybackEnabled = enabled }
+                    if (!enabled) pauseAllMedia(notifyService = true) else syncPlaybackService()
+                    toast(if (enabled) R.string.background_on else R.string.background_off)
+                }
+                MENU_NEW_TAB -> addNewTab()
+            }
+            true
+        }
+        popup.show()
+    }
+
+    private fun toast(resId: Int) =
+        Toast.makeText(requireContext(), resId, Toast.LENGTH_SHORT).show()
 
     private fun navigateTo(input: String) {
         val url = when {
@@ -331,11 +472,26 @@ class BrowserFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        PlaybackBus.stopRequested = null
+        uiHandler.removeCallbacks(stopPlaybackRunnable)
+        if (playbackServiceRunning) {
+            playbackServiceRunning = false
+            context?.let { PlaybackService.stop(it) }
+        }
         tabs.forEach {
             binding.webViewContainer.removeView(it.webView)
             it.webView.destroy()
         }
         tabs.clear()
         _binding = null
+    }
+
+    private companion object {
+        const val MENU_AD_BLOCK = 1
+        const val MENU_BACKGROUND = 2
+        const val MENU_NEW_TAB = 3
+
+        /** Grace period before the playback service is torn down. */
+        const val PLAYBACK_STOP_DELAY_MS = 30_000L
     }
 }
