@@ -26,7 +26,8 @@ try {
       windowBounds: { width: 1300, height: 820 },
       defaultAudioFormat: 'mp3',
       audioQuality: '320',
-      alwaysOnTop: false
+      alwaysOnTop: false,
+      sidebarCollapsed: false
     }
   })
 } catch {
@@ -43,7 +44,8 @@ try {
     windowBounds: { width: 1300, height: 820 },
     defaultAudioFormat: 'mp3',
     audioQuality: '320',
-    alwaysOnTop: false
+    alwaysOnTop: false,
+    sidebarCollapsed: false
   }
   let data = { ...defaults }
   try { Object.assign(data, JSON.parse(fs.readFileSync(settingsPath, 'utf8'))) } catch {}
@@ -61,6 +63,7 @@ const TOOLBAR_HEIGHT = 80 // Increased to fit tab bar
 const SIDEBAR_WIDTH = 330
 
 let mainWindow = null
+let sidebarCollapsed = false
 const browserTabs = new Map() // tabId -> BrowserView
 let activeTabId = null
 let tabIdCounter = 0
@@ -422,6 +425,7 @@ function createWindow() {
   })
 
   applyAlwaysOnTop(!!store.get('alwaysOnTop'))
+  sidebarCollapsed = !!store.get('sidebarCollapsed')
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'))
 
@@ -559,6 +563,16 @@ function createBrowserTab(url) {
     }
   })
 
+  // ⌘B while the page has focus — key events go to the BrowserView, not the
+  // renderer, so the shortcut has to be caught here and forwarded.
+  view.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.meta && !input.control && !input.alt &&
+        input.key.toLowerCase() === 'b') {
+      event.preventDefault()
+      mainWindow?.webContents.send('ui:toggle-sidebar')
+    }
+  })
+
   view.webContents.setWindowOpenHandler(({ url: newUrl }) => {
     // Force popups/ads to open in a new tab instead of a new window
     mainWindow?.webContents.send('tab:new-requested', newUrl)
@@ -693,7 +707,7 @@ function repositionBrowserView() {
   view.setBounds({
     x: 0,
     y: TOOLBAR_HEIGHT,
-    width: Math.max(0, width - SIDEBAR_WIDTH),
+    width: Math.max(0, width - (sidebarCollapsed ? 0 : SIDEBAR_WIDTH)),
     height: Math.max(0, height - TOOLBAR_HEIGHT)
   })
 }
@@ -1366,7 +1380,8 @@ ipcMain.handle('settings:get', () => store.store || {
   homepage: store.get('homepage'),
   defaultAudioFormat: store.get('defaultAudioFormat'),
   audioQuality: store.get('audioQuality'),
-  alwaysOnTop: store.get('alwaysOnTop')
+  alwaysOnTop: store.get('alwaysOnTop'),
+  sidebarCollapsed: store.get('sidebarCollapsed')
 })
 ipcMain.on('settings:set', (_, key, value) => {
   if (key === 'maxConcurrentDownloads') value = clampInt(value, 1, 10, 3)
@@ -1374,6 +1389,14 @@ ipcMain.on('settings:set', (_, key, value) => {
   if (key === 'httpConnections') value = clampInt(value, 1, 32, 16)
   store.set(key, value)
   if (key === 'maxConcurrentDownloads') drainDownloadQueue()
+})
+
+// The renderer owns the sidebar's visibility; the BrowserView is a native layer
+// on top of it, so main has to re-lay it out whenever the width changes.
+ipcMain.on('window:setSidebarCollapsed', (_, collapsed) => {
+  sidebarCollapsed = !!collapsed
+  store.set('sidebarCollapsed', sidebarCollapsed)
+  repositionBrowserView()
 })
 
 ipcMain.handle('window:toggleAlwaysOnTop', () => {

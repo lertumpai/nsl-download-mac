@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // Window
   toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
+  setSidebarCollapsed: (collapsed) => ipcRenderer.send('window:setSidebarCollapsed', collapsed),
 
   // Video player
   showPlayer: () => ipcRenderer.send('player:show'),

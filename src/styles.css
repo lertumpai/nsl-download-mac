@@ -167,6 +167,21 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .nav-btn:disabled { opacity: .3; cursor: default; }
 .nav-btn.pinned { color: var(--accent); background: var(--accent-bg); }
 
+/* Collapsing the sidebar is just this variable going to 0 — #sidebar and the
+   player panel are both sized from it. The BrowserView is native and is
+   repositioned by the main process instead. */
+body.sidebar-collapsed { --sidebar-w: 0px; }
+body.sidebar-collapsed #sidebar { border-left: none; }
+
+#btn-sidebar { position: relative; }
+#sidebar-dot {
+  position: absolute; top: 4px; right: 4px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  display: none;
+}
+body.sidebar-collapsed #sidebar-dot.active { display: block; }
+
 #address-bar {
   flex: 1;
   height: 30px;

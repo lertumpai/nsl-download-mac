@@ -61,7 +61,10 @@ function bindEvents() {
   btnBack.addEventListener('click',    () => window.api.back())
   btnFwd.addEventListener('click',     () => window.api.forward())
   btnRel.addEventListener('click',     () => window.api.reload())
-  $('btn-settings').addEventListener('click', () => switchTab('settings'))
+  $('btn-settings').addEventListener('click', () => switchTab('settings', true))
+
+  applySidebarCollapsed(!!settings.sidebarCollapsed)
+  $('btn-sidebar').addEventListener('click', () => toggleSidebar())
 
   const btnPin = $('btn-pin')
   btnPin.classList.toggle('pinned', !!settings.alwaysOnTop)
@@ -112,6 +115,14 @@ function bindEvents() {
     if (a === 'retry'  && dl) { startRetry(dl) }
   })
 
+  // ⌘B when the chrome itself has focus (the BrowserView case is forwarded from main)
+  document.addEventListener('keydown', e => {
+    if (e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'b') {
+      e.preventDefault()
+      toggleSidebar()
+    }
+  })
+
   // Settings form
   bindSettingsForm()
 
@@ -120,6 +131,8 @@ function bindEvents() {
 }
 
 function bindIPCListeners() {
+  window.api.on('ui:toggle-sidebar', () => toggleSidebar())
+
   window.api.on('browser:navigate', ({ tabId, url, title }) => {
     const tab = browserTabsList.find(t => t.id === tabId)
     if (tab) {
@@ -168,7 +181,9 @@ function bindIPCListeners() {
 
   window.api.on('video:auto-pick', ({ pageURL, pageTitle }) => {
     upsertDetectedVideo(pageURL, pageTitle, ['Video'])
-    switchTab('detected')
+    // User explicitly asked to download this video and the quality picker they
+    // need lives in the sidebar, so force it open.
+    switchTab('detected', true)
     // Give the DOM a tick to render the card before opening the picker
     setTimeout(() => {
       const card = document.querySelector(`[data-page-url="${CSS.escape(pageURL)}"]`)
@@ -926,8 +941,34 @@ async function loadLibraryFiles() {
   }
 }
 
+// ── Sidebar collapse ──────────────────────────────────────────────
+function applySidebarCollapsed(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', collapsed)
+  const btn = $('btn-sidebar')
+  btn.classList.toggle('pinned', !collapsed)
+  btn.title = collapsed ? 'Show downloads panel (⌘B)' : 'Hide downloads panel (⌘B)'
+  if (!collapsed) $('sidebar-dot').classList.remove('active')
+  window.api.setSidebarCollapsed(collapsed)
+}
+
+function toggleSidebar(force) {
+  const collapsed = force === undefined
+    ? !document.body.classList.contains('sidebar-collapsed')
+    : force
+  settings.sidebarCollapsed = collapsed
+  applySidebarCollapsed(collapsed)
+}
+
 // ── Sidebar Tabs ──────────────────────────────────────────────────
-function switchTab(name) {
+// `expand` is for clicks that explicitly ask to see the panel. Background
+// switches (a download starting) leave a collapsed sidebar collapsed and just
+// mark the toggle button, so they don't undo the user's choice.
+function switchTab(name, expand = false) {
+  if (document.body.classList.contains('sidebar-collapsed')) {
+    if (expand) toggleSidebar(false)
+    else $('sidebar-dot').classList.add('active')
+  }
+
   document.querySelectorAll('.tab-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.tab === name))
   document.querySelectorAll('.panel').forEach(p =>
@@ -939,6 +980,10 @@ function switchTab(name) {
 }
 
 function flashTab(name) {
+  // Sidebar hidden: surface the activity on the toggle button instead.
+  if (document.body.classList.contains('sidebar-collapsed'))
+    $('sidebar-dot').classList.add('active')
+
   const btn = document.querySelector(`.tab-btn[data-tab="${name}"]`)
   if (!btn) return
   btn.style.color = 'var(--accent)'
