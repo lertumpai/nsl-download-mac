@@ -215,6 +215,12 @@ class MainActivity : AppCompatActivity() {
                     browserFragment.pictureInPictureSourceRect()?.let {
                         setSourceRectHint(it)
                     }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        // A WebView is a composed page, not a resize-safe native
+                        // player surface. Let Android cross-fade the transition
+                        // instead of exposing a blank intermediate surface.
+                        setSeamlessResizeEnabled(false)
+                    }
                 }
                 .build()
             val entered = runCatching { enterPictureInPictureMode(params) }.getOrDefault(false)

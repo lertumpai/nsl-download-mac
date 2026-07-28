@@ -46,7 +46,8 @@ class RangedDownloader(base: OkHttpClient) {
          * useful trick is to keep asking for fresh, short ranges rather than to
          * ride one long response down to a trickle.
          */
-        private const val CHUNK_SIZE = 2L shl 20   // 2 MB per range request
+        private const val CHUNK_SIZE = 2L shl 20   // 2 MB per ordinary range request
+        private const val GOOGLEVIDEO_CHUNK_SIZE = 512L shl 10 // 512 KB
         private const val BUFFER_SIZE = 1 shl 16   // 64 KB
         private const val MAX_ATTEMPTS = 3
         private const val MAX_WHOLE_ATTEMPTS = 5
@@ -54,6 +55,13 @@ class RangedDownloader(base: OkHttpClient) {
 
         /** Under this the connection setup costs more than the split saves. */
         private const val MIN_PARALLEL_BYTES = 4L shl 20
+
+        /**
+         * YouTube commonly uses a separate 1–3 MB audio track after the video
+         * reaches 75%. Those small tracks still need fresh query ranges or the
+         * final stage is pinned to Google's per-response playback rate.
+         */
+        private const val MIN_GOOGLEVIDEO_PARALLEL_BYTES = 256L shl 10
     }
 
     /**
@@ -88,7 +96,11 @@ class RangedDownloader(base: OkHttpClient) {
         onProgress: (Int, Long) -> Unit
     ): Boolean {
         val probe = probe(url, headers)
-        if (probe != null && probe.acceptsRanges && probe.length >= MIN_PARALLEL_BYTES) {
+        val parallelThreshold = when (probe?.mode) {
+            RangeMode.QUERY -> MIN_GOOGLEVIDEO_PARALLEL_BYTES
+            else -> MIN_PARALLEL_BYTES
+        }
+        if (probe != null && probe.acceptsRanges && probe.length >= parallelThreshold) {
             if (downloadRanged(url, output, headers, probe.length, probe.mode, onProgress)) {
                 return true
             }
@@ -170,10 +182,14 @@ class RangedDownloader(base: OkHttpClient) {
         }
 
         val queue = java.util.concurrent.ConcurrentLinkedQueue<Chunk>()
+        val chunkSize = when (mode) {
+            RangeMode.QUERY -> GOOGLEVIDEO_CHUNK_SIZE
+            RangeMode.HEADER -> CHUNK_SIZE
+        }
         var offset = 0L
         while (offset < total) {
-            queue.add(Chunk(offset, minOf(offset + CHUNK_SIZE, total) - 1))
-            offset += CHUNK_SIZE
+            queue.add(Chunk(offset, minOf(offset + chunkSize, total) - 1))
+            offset += chunkSize
         }
 
         val done = AtomicLong(0)

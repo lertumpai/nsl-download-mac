@@ -39,7 +39,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val rows = combine(
         dao.observeAll(), DownloadProgressBus.state, selectedFolderId
     ) { list, progress, folderId ->
-        list.filter { folderId == null || it.folderId == folderId }
+        list.inLibraryFolder(folderId)
             .map { VideoRow(it, progress[it.id]) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -119,22 +119,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Remove every video in the current view and wipe their files. */
+    /** Remove every video in the current root/folder view and wipe their files. */
     fun removeAll() {
         val folderId = selectedFolderId.value
         viewModelScope.launch(Dispatchers.IO) {
-            val all = dao.observeAllOnce()
-                .filter { folderId == null || it.folderId == folderId }
+            val all = dao.observeAllOnce().inLibraryFolder(folderId)
             all.forEach {
                 stopIfDownloading(it)
                 deleteFiles(it)
                 dao.deleteById(it.id)
             }
-            if (folderId == null) {
-                // Also clear any orphans left behind by older builds, which kept
-                // downloads in app-private storage.
-                File(getApplication<Application>().filesDir, "downloads").deleteRecursively()
-            } else {
+            if (folderId != null) {
                 folderName(folderId)?.let { MediaStorage.removeFolderIfEmpty(it) }
             }
         }

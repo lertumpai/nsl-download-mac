@@ -244,14 +244,22 @@ class BrowserFragment : Fragment() {
     /**
      * Called just before the activity asks the system for a PiP window.
      *
-     * The window goes away for the length of the transition, and Chromium pauses
-     * every media element as soon as it does — the pause comes from the browser,
-     * so the page-level hooks cannot stop it. Pinning the reported visibility
-     * first is what keeps the video running into the floating window.
+     * PiP reparents the activity's render surface. It is important that Chromium
+     * receives the real window-visibility callbacks during that transition;
+     * forcing VISIBLE here leaves some Samsung WebView builds attached to the
+     * old full-screen surface and the PiP window is rendered white.
      */
     fun prepareForPictureInPicture(onReady: () -> Unit) {
         pictureInPictureActive = true
-        tabs.forEach { it.webView.backgroundPlaybackEnabled = true }
+        if (!currentTab.isPlaying) {
+            tabs.indexOfFirst { it.isPlaying }.takeIf { it >= 0 }?.let { switchToTab(it) }
+        }
+        tabs.forEach {
+            it.webView.backgroundPlaybackEnabled = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                it.webView.settings.offscreenPreRaster = false
+            }
+        }
         // Normal browsing deliberately uses a wide overview viewport. In a
         // tiny PiP window that preserves the old phone-width layout and Android
         // displays only a cropped strip of YouTube's video. Let the viewport
@@ -313,6 +321,10 @@ class BrowserFragment : Fragment() {
         if (isInPictureInPictureMode) binding.fabDownload.hide() else updateFab()
 
         if (isInPictureInPictureMode) {
+            // The real invisible/visible handoff has completed at this point.
+            // Pin the active WebView visible now so Chromium does not suspend
+            // decoding merely because the hosting activity remains paused.
+            currentWebView.keepPlayingInPictureInPicture()
             // The page may not pause itself while it floats over another app:
             // YouTube calls pause() several times a second in this state.
             tabs.forEach {
@@ -338,6 +350,9 @@ class BrowserFragment : Fragment() {
             it.webView.backgroundPlaybackEnabled = prefs.backgroundPlaybackEnabled
             it.webView.settings.useWideViewPort = true
             it.webView.settings.loadWithOverviewMode = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                it.webView.settings.offscreenPreRaster = true
+            }
             it.webView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
         if (_binding != null) binding.root.setBackgroundColor(android.graphics.Color.TRANSPARENT)

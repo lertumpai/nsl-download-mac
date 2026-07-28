@@ -23,6 +23,19 @@ class BackgroundWebView @JvmOverloads constructor(
 
     var backgroundPlaybackEnabled: Boolean = true
 
+    /**
+     * PiP first needs Android's real visibility event so Chromium can move its
+     * render surface, then it needs a visible signal again because the hosting
+     * activity remains paused while the floating window is on screen.
+     */
+    fun keepPlayingInPictureInPicture() {
+        backgroundPlaybackEnabled = true
+        super.onWindowVisibilityChanged(VISIBLE)
+        onResume()
+        resumeTimers()
+        invalidate()
+    }
+
     override fun onWindowVisibilityChanged(visibility: Int) {
         if (backgroundPlaybackEnabled && visibility != VISIBLE) {
             super.onWindowVisibilityChanged(VISIBLE)

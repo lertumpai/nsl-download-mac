@@ -763,10 +763,20 @@ class DownloadService : Service() {
         private var lastBytes = 0L
         private var speed = 0L
         fun sample(bytes: Long): Long {
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (lastTime == 0L) {
                 lastTime = now
                 lastBytes = bytes
+                return 0L
+            }
+            // A muxed YouTube job reports the video and audio transfers through
+            // the same meter. The second track starts its byte count at zero;
+            // treat that as a new sample window instead of showing a negative
+            // or stale speed inherited from the much larger video track.
+            if (bytes < lastBytes) {
+                lastTime = now
+                lastBytes = bytes
+                speed = 0L
                 return 0L
             }
             val dt = now - lastTime

@@ -143,13 +143,12 @@ object BrowserScripts {
         "(function(){ window.__nslBlockPause = $blocked; })();"
 
     /**
-     * Stretches the currently playing video over the whole viewport.
+     * Moves the currently playing video directly under the page root and
+     * stretches its real decoder surface over the viewport.
      *
-     * Activity-level Picture-in-Picture normally shrinks the entire browser
-     * page. Responsive sites can move their player outside that tiny viewport,
-     * leaving Android with a white floating window. The page fullscreen API
-     * cannot be requested here because it requires a user gesture, so a
-     * temporary CSS class pins the live video surface in place instead.
+     * Mirroring a hardware-decoded video through canvas works on the emulator
+     * but several phone WebView implementations return a blank frame. Keeping
+     * the actual video element visible avoids that white/black PiP window.
      */
     private fun pipFitScript(height: String) = """
     (function () {
@@ -164,15 +163,22 @@ object BrowserScripts {
       })[0] || videos[0];
 
       var old = window.__nslPipVideo;
-      if (old && old !== video) old.classList.remove('__nsl-pip-video');
-      window.__nslPipVideo = video;
-
-      var canvas = document.getElementById('__nsl_pip_canvas');
-      if (!canvas) {
-        canvas = document.createElement('canvas');
-        canvas.id = '__nsl_pip_canvas';
-        (document.body || document.documentElement).appendChild(canvas);
+      if (old && old !== video) {
+        old.classList.remove('__nsl-pip-video');
+        var oldParent = window.__nslPipVideoParent;
+        var oldNext = window.__nslPipVideoNext;
+        if (oldParent && oldParent.isConnected) {
+          if (oldNext && oldNext.parentNode === oldParent) oldParent.insertBefore(old, oldNext);
+          else oldParent.appendChild(old);
+        }
+        window.__nslPipVideoParent = null;
+        window.__nslPipVideoNext = null;
       }
+      if (!window.__nslPipVideoParent || old !== video) {
+        window.__nslPipVideoParent = video.parentNode;
+        window.__nslPipVideoNext = video.nextSibling;
+      }
+      window.__nslPipVideo = video;
 
       var style = document.getElementById('__nsl_pip_fit');
       if (!style) {
@@ -184,58 +190,20 @@ object BrowserScripts {
         'html.__nsl-pip-root,body.__nsl-pip-root{' +
           'margin:0!important;padding:0!important;overflow:hidden!important;' +
           'background:#000!important;width:100%!important;height:100%!important}' +
-        '.__nsl-pip-ancestor{' +
-          'transform:none!important;overflow:visible!important;clip:auto!important;' +
-          'clip-path:none!important;opacity:1!important;visibility:visible!important}' +
         'video.__nsl-pip-video{' +
-          'display:block!important;visibility:visible!important;opacity:0!important;' +
+          'display:block!important;visibility:visible!important;opacity:1!important;' +
           'position:fixed!important;left:0!important;top:0!important;' +
           'margin:0!important;padding:0!important;width:100vw!important;' +
           'height:$height!important;max-width:none!important;max-height:none!important;' +
           'object-fit:contain!important;background:#000!important;' +
-          'transform:none!important;z-index:2147483646!important}' +
-        'canvas#__nsl_pip_canvas{' +
-          'display:block!important;visibility:visible!important;opacity:1!important;' +
-          'position:fixed!important;left:0!important;top:0!important;' +
-          'margin:0!important;padding:0!important;width:100vw!important;' +
-          'height:$height!important;background:#000!important;' +
-          'transform:none!important;z-index:2147483647!important}';
+          'transform:translateZ(0)!important;z-index:2147483647!important}';
 
       document.documentElement.classList.add('__nsl-pip-root');
       if (document.body) document.body.classList.add('__nsl-pip-root');
-      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
-        node.classList.remove('__nsl-pip-ancestor');
-      });
-      for (var parent = video.parentElement;
-           parent && parent !== document.body && parent !== document.documentElement;
-           parent = parent.parentElement) {
-        parent.classList.add('__nsl-pip-ancestor');
-      }
+      var host = document.body || document.documentElement;
+      if (video.parentNode !== host) host.appendChild(video);
       video.classList.add('__nsl-pip-video');
       try { video.setAttribute('playsinline', ''); } catch (e) {}
-
-      if (window.__nslPipRaf) cancelAnimationFrame(window.__nslPipRaf);
-      var draw = function () {
-        if (!canvas.isConnected || !video.isConnected) return;
-        var rect = canvas.getBoundingClientRect();
-        var scale = window.devicePixelRatio || 1;
-        var width = Math.max(1, Math.round(rect.width * scale));
-        var height = Math.max(1, Math.round(rect.height * scale));
-        if (canvas.width !== width) canvas.width = width;
-        if (canvas.height !== height) canvas.height = height;
-        var ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.fillStyle = '#000';
-          ctx.fillRect(0, 0, width, height);
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            var fit = Math.min(width / video.videoWidth, height / video.videoHeight);
-            var dw = video.videoWidth * fit, dh = video.videoHeight * fit;
-            try { ctx.drawImage(video, (width - dw) / 2, (height - dh) / 2, dw, dh); } catch (e) {}
-          }
-        }
-        window.__nslPipRaf = requestAnimationFrame(draw);
-      };
-      draw();
       return 'video-ready';
     })();
     """.trimIndent()
@@ -254,19 +222,22 @@ object BrowserScripts {
     val PIP_FIT_OFF = """
     (function () {
       var video = window.__nslPipVideo;
-      if (video) video.classList.remove('__nsl-pip-video');
-      if (window.__nslPipRaf) cancelAnimationFrame(window.__nslPipRaf);
-      window.__nslPipRaf = null;
-      var canvas = document.getElementById('__nsl_pip_canvas');
-      if (canvas) canvas.remove();
-      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
-        node.classList.remove('__nsl-pip-ancestor');
-      });
+      if (video) {
+        video.classList.remove('__nsl-pip-video');
+        var parent = window.__nslPipVideoParent;
+        var next = window.__nslPipVideoNext;
+        if (parent && parent.isConnected) {
+          if (next && next.parentNode === parent) parent.insertBefore(video, next);
+          else parent.appendChild(video);
+        }
+      }
       document.documentElement.classList.remove('__nsl-pip-root');
       if (document.body) document.body.classList.remove('__nsl-pip-root');
       var style = document.getElementById('__nsl_pip_fit');
       if (style) style.remove();
       window.__nslPipVideo = null;
+      window.__nslPipVideoParent = null;
+      window.__nslPipVideoNext = null;
       return 'restored';
     })();
     """.trimIndent()
