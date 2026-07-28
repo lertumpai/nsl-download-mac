@@ -4,6 +4,13 @@ plugins {
     id 'kotlin-kapt'
 }
 
+// Optional keystore.properties overrides the defaults below (keep it out of git).
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
 android {
     namespace 'com.nsl.downloader'
     compileSdk 35
@@ -18,8 +25,18 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        release {
+            storeFile file(keystoreProps.getProperty('storeFile', '../nsl-release.jks'))
+            storePassword keystoreProps.getProperty('storePassword', 'nsldownloader')
+            keyAlias keystoreProps.getProperty('keyAlias', 'nsl')
+            keyPassword keystoreProps.getProperty('keyPassword', 'nsldownloader')
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
