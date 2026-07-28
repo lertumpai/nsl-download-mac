@@ -93,6 +93,8 @@ class MainActivity : AppCompatActivity() {
             if (it === target) tx.show(it) else tx.hide(it)
         }
         tx.commit()
+        // Only the browser has anything to float, so auto-enter follows the tab.
+        binding.root.post { refreshPictureInPictureParams() }
     }
 
     private fun isBrowserVisible(): Boolean =
@@ -184,49 +186,77 @@ class MainActivity : AppCompatActivity() {
     /**
      * Fires when the user swipes to another app or goes home. With PiP selected
      * as the playback mode, a playing page follows them into a floating window.
+     *
+     * Android 12+ normally never gets here: [refreshPictureInPictureParams]
+     * keeps auto-enter armed and the system performs the handoff itself, which
+     * is both seamless and immune to the timing trap below.
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         maybeEnterPictureInPicture()
     }
 
+    private fun pictureInPictureSupported(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    /** True when a PiP window would actually have something to show. */
+    private fun pictureInPictureEligible(): Boolean =
+        prefs.pictureInPictureEnabled &&
+            ::browserFragment.isInitialized &&
+            isBrowserVisible() &&
+            browserFragment.hasPlayingMedia()
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
+    private fun buildPictureInPictureParams(): PictureInPictureParams =
+        PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+            .apply {
+                if (::browserFragment.isInitialized) {
+                    browserFragment.pictureInPictureSourceRect()?.let { setSourceRectHint(it) }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // A WebView is a composed page, not a resize-safe native
+                    // player surface. Let Android cross-fade the transition
+                    // instead of exposing a blank intermediate surface.
+                    setSeamlessResizeEnabled(false)
+                    // Arming auto-enter is what makes PiP reliable: the system
+                    // shrinks the activity as part of the home animation, so the
+                    // media pipeline is never handed a "window went away" event.
+                    setAutoEnterEnabled(pictureInPictureEligible())
+                }
+            }
+            .build()
+
+    /**
+     * Pushes current params to the system. Called whenever playback starts or
+     * stops so Android 12+ always knows whether this activity wants to shrink
+     * into a floating window on the next home gesture.
+     */
+    fun refreshPictureInPictureParams() {
+        if (!pictureInPictureSupported()) return
+        if (isFinishing || isDestroyed) return
+        runCatching { setPictureInPictureParams(buildPictureInPictureParams()) }
+    }
+
     private fun maybeEnterPictureInPicture() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        if (!prefs.pictureInPictureEnabled) return
+        if (!pictureInPictureSupported()) return
         if (isInPictureInPictureMode) return
         if (pictureInPictureEntryPending) return
-        if (!isBrowserVisible() || !browserFragment.hasPlayingMedia()) return
-        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
+        if (!pictureInPictureEligible()) return
 
         pictureInPictureEntryPending = true
-        // The fragment first pins the playing <video> to its viewport and waits
-        // for Chromium to draw it. Entering PiP before that draw is what lets a
-        // responsive page resize to an empty white area.
-        browserFragment.prepareForPictureInPicture {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-                isFinishing || isDestroyed || isInPictureInPictureMode
-            ) {
-                pictureInPictureEntryPending = false
-                return@prepareForPictureInPicture
-            }
-            val params = PictureInPictureParams.Builder()
-                .setAspectRatio(Rational(16, 9))
-                .apply {
-                    browserFragment.pictureInPictureSourceRect()?.let {
-                        setSourceRectHint(it)
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        // A WebView is a composed page, not a resize-safe native
-                        // player surface. Let Android cross-fade the transition
-                        // instead of exposing a blank intermediate surface.
-                        setSeamlessResizeEnabled(false)
-                    }
-                }
-                .build()
-            val entered = runCatching { enterPictureInPictureMode(params) }.getOrDefault(false)
-            pictureInPictureEntryPending = false
-            if (!entered) browserFragment.onPictureInPictureEntryFailed()
-        }
+        // Everything the page needs is fire-and-forget on purpose. Android only
+        // accepts enterPictureInPictureMode() while the activity is still
+        // resumed/paused; waiting for the WebView to acknowledge the layout
+        // pushed the request past onStop, the call was rejected, and the video
+        // simply died in the background instead of floating.
+        browserFragment.prepareForPictureInPicture()
+        val entered = runCatching {
+            enterPictureInPictureMode(buildPictureInPictureParams())
+        }.getOrDefault(false)
+        pictureInPictureEntryPending = false
+        if (!entered) browserFragment.onPictureInPictureEntryFailed()
     }
 
     override fun onPictureInPictureModeChanged(
@@ -238,7 +268,11 @@ class MainActivity : AppCompatActivity() {
         // In a PiP window there is only room for the video itself.
         // The fragments get their own callback dispatched by FragmentActivity.
         binding.footer.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
-        if (!isInPictureInPictureMode) applyFooterCollapsed(prefs.footerCollapsed)
+        if (!isInPictureInPictureMode) {
+            applyFooterCollapsed(prefs.footerCollapsed)
+            // Re-arm for the next time the user leaves.
+            refreshPictureInPictureParams()
+        }
     }
 
     // ------------------------------------------------------------ lifecycle

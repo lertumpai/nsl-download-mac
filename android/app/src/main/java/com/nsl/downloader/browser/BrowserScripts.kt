@@ -131,6 +131,31 @@ object BrowserScripts {
     """.trimIndent()
 
     /**
+     * Records which video is playing, without touching the layout.
+     *
+     * On Android 12+ the system auto-enters Picture-in-Picture with no callback
+     * beforehand, so by the time [PIP_FIT_ON] runs the transition may already
+     * have paused the video — too late for it to notice what was playing. This
+     * runs while the app is still on screen, so [RESUME_PIP_MEDIA] always has a
+     * target.
+     */
+    val MARK_PIP_VIDEO = """
+    (function () {
+      var videos = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
+      var video = videos.filter(function (v) {
+        return !v.paused && !v.ended;
+      }).sort(function (a, b) {
+        var ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+        return (br.width * br.height) - (ar.width * ar.height);
+      })[0];
+      if (!video) return 'none';
+      window.__nslPipVideo = video;
+      window.__nslPipWasPlaying = true;
+      return 'marked';
+    })();
+    """.trimIndent()
+
+    /**
      * Lets the app refuse page-initiated pauses for a while.
      *
      * Sites pause themselves on all sorts of window events, and in a floating

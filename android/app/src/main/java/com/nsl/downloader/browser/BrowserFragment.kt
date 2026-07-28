@@ -201,6 +201,9 @@ class BrowserFragment : Fragment() {
             isPlaying = playing
             mediaTitle = title
             syncPlaybackService()
+            // Android 12+ decides whether to auto-enter PiP from the params it
+            // already holds, so they have to track playback as it changes.
+            (activity as? com.nsl.downloader.MainActivity)?.refreshPictureInPictureParams()
         }
 
         /** Bridge exposed to page JS as `NSLBridge`. */
@@ -239,21 +242,70 @@ class BrowserFragment : Fragment() {
     }
 
     /** True while any tab has playing media — drives the PiP decision. */
-    fun hasPlayingMedia(): Boolean = tabs.any { it.isPlaying }
+    fun hasPlayingMedia(): Boolean = tabs.isNotEmpty() && tabs.any { it.isPlaying }
+
+    /**
+     * Last chance to act before the window goes away.
+     *
+     * With auto-enter armed there is no callback between the home gesture and
+     * the PiP window existing, so the playing tab has to already be immune to
+     * the window-visibility drop — otherwise Chromium stops the decoder and the
+     * floating window shows a frozen frame.
+     */
+    override fun onPause() {
+        super.onPause()
+        if (_binding == null || !prefs.pictureInPictureEnabled) return
+        if (activity?.isChangingConfigurations == true) return
+        if (!hasPlayingMedia()) return
+        if (!currentTab.isPlaying) {
+            tabs.indexOfFirst { it.isPlaying }.takeIf { it >= 0 }?.let { switchToTab(it) }
+        }
+        tabs.forEach { it.webView.backgroundPlaybackEnabled = it === currentTab }
+        currentWebView.evaluateJavascript(BrowserScripts.MARK_PIP_VIDEO, null)
+    }
+
+    /**
+     * PiP never happened (feature unavailable, or the system refused). Undo the
+     * pre-arming from [onPause]: a hidden WebView must not be left playing audio
+     * with no notification and no way to stop it.
+     */
+    override fun onStop() {
+        super.onStop()
+        if (_binding == null || !prefs.pictureInPictureEnabled) return
+        if (activity?.isChangingConfigurations == true) return
+        if (pictureInPictureActive) return
+        leavePictureInPictureLayout()
+        pauseAllMedia(notifyService = true)
+    }
 
     /**
      * Called just before the activity asks the system for a PiP window.
      *
-     * PiP reparents the activity's render surface. Keep the playing WebView
-     * visible to Chromium throughout that handoff so its decoder is not paused;
-     * the page script separately pins the real video surface into the resized
-     * viewport.
+     * Deliberately synchronous and fire-and-forget: the activity must call
+     * `enterPictureInPictureMode()` in the same call stack as `onUserLeaveHint`,
+     * so nothing here may wait on a WebView round trip. The page-side CSS lands
+     * a few milliseconds later and is re-applied from
+     * [onPictureInPictureModeChanged] once the window really exists.
      */
-    fun prepareForPictureInPicture(onReady: () -> Unit) {
+    fun prepareForPictureInPicture() {
         pictureInPictureActive = true
         if (!currentTab.isPlaying) {
             tabs.indexOfFirst { it.isPlaying }.takeIf { it >= 0 }?.let { switchToTab(it) }
         }
+        applyPictureInPictureLayout(BrowserScripts.PIP_FIT_PREPARE)
+    }
+
+    /**
+     * PiP reparents the activity's render surface. Keep the playing WebView
+     * visible to Chromium throughout that handoff so its decoder is not paused;
+     * the page script separately pins the real video surface into the resized
+     * viewport.
+     *
+     * Idempotent, because there are two ways in: our own explicit request, and
+     * the system's auto-enter on Android 12+, which arrives with no warning.
+     */
+    private fun applyPictureInPictureLayout(fitScript: String) {
+        if (_binding == null) return
         tabs.forEach { tab ->
             val keepAlive = tab === currentTab
             tab.webView.backgroundPlaybackEnabled = keepAlive
@@ -272,21 +324,9 @@ class BrowserFragment : Fragment() {
 
         currentWebView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
         currentWebView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
-
-        var delivered = false
-        fun ready() {
-            if (delivered) return
-            delivered = true
-            currentWebView.requestLayout()
-            currentWebView.invalidate()
-            // Give Chromium one draw after the CSS change so Android captures
-            // the video surface, not the old white responsive-page viewport.
-            currentWebView.postOnAnimation(onReady)
-        }
-        currentWebView.evaluateJavascript(BrowserScripts.PIP_FIT_PREPARE) { ready() }
-        // A broken page must not be able to block PiP forever by withholding
-        // the JavaScript callback.
-        uiHandler.postDelayed({ ready() }, PIP_PREPARE_TIMEOUT_MS)
+        currentWebView.evaluateJavascript(fitScript, null)
+        currentWebView.requestLayout()
+        currentWebView.invalidate()
     }
 
     /**
@@ -295,7 +335,7 @@ class BrowserFragment : Fragment() {
      * browser when it creates a 16:9 floating window.
      */
     fun pictureInPictureSourceRect(): Rect? {
-        if (_binding == null) return null
+        if (_binding == null || tabs.isEmpty()) return null
         val rect = Rect()
         if (!currentWebView.getGlobalVisibleRect(rect) || rect.width() <= 0) return null
         val videoHeight = (rect.width() * 9 / 16).coerceAtMost(rect.height())
@@ -322,6 +362,9 @@ class BrowserFragment : Fragment() {
         if (isInPictureInPictureMode) binding.fabDownload.hide() else updateFab()
 
         if (isInPictureInPictureMode) {
+            // On Android 12+ the system can auto-enter without ever calling
+            // prepareForPictureInPicture, so the full setup has to run here too.
+            applyPictureInPictureLayout(BrowserScripts.PIP_FIT_ON)
             // The real invisible/visible handoff has completed at this point.
             // Pin the active WebView visible now so Chromium does not suspend
             // decoding merely because the hosting activity remains paused.
@@ -332,10 +375,7 @@ class BrowserFragment : Fragment() {
                 it.webView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
                 it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
             }
-            currentWebView.evaluateJavascript(BrowserScripts.PIP_FIT_ON, null)
             currentWebView.evaluateJavascript(BrowserScripts.RESUME_PIP_MEDIA, null)
-            currentWebView.setBackgroundColor(android.graphics.Color.BLACK)
-            binding.root.setBackgroundColor(android.graphics.Color.BLACK)
             // Belt and braces: if the transition still managed to pause the
             // video, start it again once the window has settled.
             resumeMediaSoon()
@@ -1148,6 +1188,5 @@ class BrowserFragment : Fragment() {
 
         /** Grace period before the playback service is torn down. */
         const val PLAYBACK_STOP_DELAY_MS = 30_000L
-        const val PIP_PREPARE_TIMEOUT_MS = 300L
     }
 }
