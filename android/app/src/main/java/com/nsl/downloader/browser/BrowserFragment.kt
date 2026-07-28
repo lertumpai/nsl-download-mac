@@ -20,6 +20,7 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.nsl.downloader.R
+import com.nsl.downloader.data.DownloadQueueBus
 import com.nsl.downloader.databinding.FragmentBrowserBinding
 import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.service.HlsDownloader
@@ -32,6 +33,9 @@ import com.nsl.downloader.util.guessTitleFromUrl
 import com.nsl.downloader.util.VideoType
 import com.nsl.downloader.youtube.YouTubeResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -646,25 +650,46 @@ class BrowserFragment : Fragment() {
     }
 
     /**
-     * Reads the playlist listing, then queues one job per entry. Each job only
-     * carries the watch URL — stream URLs are resolved by the service as it
-     * reaches the item, since they expire long before a long queue drains.
+     * Reads the playlist listing, lets the user pick which entries to keep,
+     * then queues one job per selection. Each job only carries the watch URL —
+     * stream URLs are resolved by the service as it reaches the item, since
+     * they expire long before a long queue drains.
+     *
+     * The jobs share a batch id so the Library and the notification can call
+     * the rest of the playlist off in one go.
      */
     private fun downloadPlaylist(playlistUrl: String, format: DownloadService.YtFormat) {
         val userAgent = currentWebView.settings.userAgentString
         val bitrate = prefs.mp3Bitrate
+
+        // Reading a long playlist means walking its continuation pages, so the
+        // wait is worth both a running count and a way out.
+        var reader: Job? = null
         val progress = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.yt_reading_playlist)
-            .setView(android.widget.ProgressBar(requireContext()).apply {
-                setPadding(48, 48, 48, 48)
-            })
-            .setCancelable(false)
+            .setMessage(getString(R.string.yt_playlist_reading_count, 0))
+            .setNegativeButton(android.R.string.cancel) { _, _ -> reader?.cancel() }
+            .setOnCancelListener { reader?.cancel() }
             .show()
 
-        viewLifecycleOwner.lifecycleScope.launch {
+        reader = viewLifecycleOwner.lifecycleScope.launch {
             val playlist = withContext(Dispatchers.IO) {
                 YouTubeResolver.ensureInitialised(userAgent)
-                runCatching { YouTubeResolver.resolvePlaylist(playlistUrl) }.getOrNull()
+                val ctx = currentCoroutineContext()
+                runCatching {
+                    YouTubeResolver.resolvePlaylist(playlistUrl) { loaded ->
+                        // Also the only place the read can notice a cancel:
+                        // the extractor call itself blocks.
+                        ctx.ensureActive()
+                        launch(Dispatchers.Main) {
+                            if (progress.isShowing) {
+                                progress.setMessage(
+                                    getString(R.string.yt_playlist_reading_count, loaded)
+                                )
+                            }
+                        }
+                    }
+                }.getOrNull()
             }
             progress.dismiss()
             if (!isAdded) return@launch
@@ -674,31 +699,37 @@ class BrowserFragment : Fragment() {
                 return@launch
             }
 
-            MaterialAlertDialogBuilder(requireContext())
-                .setTitle(playlist!!.title)
-                .setMessage(getString(R.string.yt_playlist_confirm, items.size))
-                .setPositiveButton(R.string.download) { _, _ ->
-                    items.forEach { item ->
-                        DownloadService.startYouTube(
-                            context = requireContext(),
-                            pageUrl = item.url,
-                            title = item.title,
-                            format = format,
-                            targetHeight = 0,
-                            mp3Bitrate = bitrate,
-                            userAgent = userAgent
-                        )
-                    }
-                    Toast.makeText(
-                        requireContext(),
-                        getString(R.string.yt_playlist_queued, items.size),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
-                }
-                .setNegativeButton(android.R.string.cancel, null)
-                .show()
+            PlaylistPicker.show(requireContext(), playlist!!.title, items) { selected ->
+                queuePlaylist(selected, playlist.title, format, bitrate, userAgent)
+            }
         }
+    }
+
+    private fun queuePlaylist(
+        selected: List<YouTubeResolver.PlaylistItem>,
+        playlistTitle: String,
+        format: DownloadService.YtFormat,
+        bitrate: Int,
+        userAgent: String
+    ) {
+        val batchId = DownloadService.newBatchId()
+        // Registered before the items are handed over so the Library can show —
+        // and cancel — the whole queue, not just what is transferring.
+        DownloadQueueBus.start(batchId, playlistTitle, selected.size)
+        DownloadService.startYouTubePlaylist(
+            context = requireContext(),
+            items = selected.map { it.url to it.title },
+            format = format,
+            mp3Bitrate = bitrate,
+            userAgent = userAgent,
+            batchId = batchId
+        )
+        Toast.makeText(
+            requireContext(),
+            getString(R.string.yt_playlist_queued, selected.size),
+            Toast.LENGTH_SHORT
+        ).show()
+        (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
     }
 
     private fun startYouTubeDownload(

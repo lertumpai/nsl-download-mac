@@ -16,11 +16,13 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.nsl.downloader.R
+import com.nsl.downloader.data.DownloadQueueBus
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.FolderEntity
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.databinding.FragmentLibraryBinding
 import com.nsl.downloader.player.PlayerActivity
+import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.util.MediaStorage
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -72,6 +74,39 @@ class LibraryFragment : Fragment() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.folders.collectLatest { rebuildChips(it) }
         }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            DownloadQueueBus.state.collectLatest { showBatchBanner(it.firstOrNull()) }
+        }
+    }
+
+    // ------------------------------------------------------ playlist queue
+
+    /**
+     * Queued playlist items have no library row until their turn comes, so the
+     * banner is the only place the rest of the queue is visible — and the only
+     * way to stop it without cancelling row by row as each one starts.
+     */
+    private fun showBatchBanner(batch: DownloadQueueBus.Batch?) {
+        binding.batchBanner.visibility = if (batch == null) View.GONE else View.VISIBLE
+        if (batch == null) return
+        binding.batchText.text = getString(
+            R.string.library_batch_progress, batch.label, batch.finished, batch.total
+        )
+        binding.btnCancelBatch.setOnClickListener { confirmCancelBatch(batch) }
+    }
+
+    private fun confirmCancelBatch(batch: DownloadQueueBus.Batch) {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.library_cancel_batch_title)
+            .setMessage(
+                getString(R.string.library_cancel_batch_message, batch.label, batch.remaining)
+            )
+            .setPositiveButton(R.string.library_cancel_batch) { _, _ ->
+                DownloadService.cancelBatch(requireContext(), batch.id)
+            }
+            .setNegativeButton(R.string.keep_downloading, null)
+            .show()
     }
 
     // -------------------------------------------------------------- folders

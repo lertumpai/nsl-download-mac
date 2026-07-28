@@ -11,6 +11,7 @@ import com.nsl.downloader.MainActivity
 import com.nsl.downloader.R
 import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.data.DownloadProgressBus
+import com.nsl.downloader.data.DownloadQueueBus
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.util.MediaStorage
@@ -30,7 +31,9 @@ class DownloadService : Service() {
     companion object {
         const val ACTION_DOWNLOAD = "com.nsl.downloader.DOWNLOAD"
         const val ACTION_CANCEL = "com.nsl.downloader.CANCEL"
+        const val ACTION_CANCEL_BATCH = "com.nsl.downloader.CANCEL_BATCH"
         const val EXTRA_VIDEO_ID = "video_id"
+        const val EXTRA_BATCH_ID = "batch_id"
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_HEADERS = "headers"
@@ -38,6 +41,8 @@ class DownloadService : Service() {
         const val EXTRA_YT_FORMAT = "yt_format"
         const val EXTRA_YT_HEIGHT = "yt_height"
         const val EXTRA_MP3_BITRATE = "mp3_bitrate"
+        const val EXTRA_YT_URLS = "yt_urls"
+        const val EXTRA_YT_TITLES = "yt_titles"
         const val EXTRA_FOLDER_ID = "folder_id"
         const val EXTRA_FOLDER_NAME = "folder_name"
         const val EXTRA_USER_AGENT = "user_agent"
@@ -46,7 +51,11 @@ class DownloadService : Service() {
         const val NOTIF_ID = 1001            // foreground summary
         const val PROGRESS_NOTIF_BASE = 20000 // per-download progress
         const val DONE_NOTIF_BASE = 30000     // per-download complete/failed
+        const val BATCH_DONE_NOTIF_BASE = 40000 // per-playlist complete
         const val MAX_CONCURRENT = 3          // simultaneous downloads
+
+        /** Keeps batch PendingIntent request codes clear of the video-id ones. */
+        private const val BATCH_REQUEST_OFFSET = 100_000L
 
         /** Progress is posted at most this often; see the note in [runJob]. */
         private const val PROGRESS_INTERVAL_MS = 300L
@@ -62,6 +71,14 @@ class DownloadService : Service() {
         private val cancelledIds: MutableSet<Long> =
             java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
 
+        /** Which batch (playlist) an in-flight row belongs to; see [cancelBatch]. */
+        private val batchOfVideo = ConcurrentHashMap<Long, Long>()
+
+        private val batchSeq = java.util.concurrent.atomic.AtomicLong(1L)
+
+        /** Ties the items of one playlist together so they can be cancelled as one. */
+        fun newBatchId(): Long = batchSeq.getAndIncrement()
+
         /**
          * Stops the download filling library row [videoId] and discards its
          * partial file. A no-op for rows that already finished, so callers do
@@ -70,6 +87,25 @@ class DownloadService : Service() {
         fun cancel(videoId: Long) {
             cancelledIds.add(videoId)
             running.remove(videoId)?.cancel(CancellationException("cancelled by user"))
+        }
+
+        /**
+         * Calls off a whole playlist: items still queued never start, and the
+         * ones already transferring stop like a single cancel. The queue lives
+         * on the service instance, so this has to go through an Intent.
+         */
+        fun cancelBatch(context: Context, batchId: Long) {
+            // Drop it here as well as in the service: the banner should go away
+            // on tap even if the service is already tearing itself down.
+            DownloadQueueBus.remove(batchId)
+            runCatching {
+                context.startService(
+                    Intent(context, DownloadService::class.java).apply {
+                        action = ACTION_CANCEL_BATCH
+                        putExtra(EXTRA_BATCH_ID, batchId)
+                    }
+                )
+            }
         }
 
         /** A plain URL download: HLS, DASH or a direct progressive file. */
@@ -122,6 +158,38 @@ class DownloadService : Service() {
             )
         }
 
+        /**
+         * A whole playlist in one go. Sending 200 separate Intents works, but
+         * each one restarts the service and re-posts its notification, which
+         * the system throttles ("enqueue rate … shedding") — so the items ride
+         * in together and are queued in order.
+         */
+        fun startYouTubePlaylist(
+            context: Context,
+            items: List<Pair<String, String>>,
+            format: YtFormat,
+            mp3Bitrate: Int = 192,
+            userAgent: String,
+            batchId: Long,
+            folderId: Long? = null,
+            folderName: String? = null
+        ) {
+            if (items.isEmpty()) return
+            context.startDownload(
+                Intent(context, DownloadService::class.java).apply {
+                    putExtra(EXTRA_KIND, Kind.YOUTUBE.name)
+                    putStringArrayListExtra(EXTRA_YT_URLS, ArrayList(items.map { it.first }))
+                    putStringArrayListExtra(EXTRA_YT_TITLES, ArrayList(items.map { it.second }))
+                    putExtra(EXTRA_YT_FORMAT, format.name)
+                    putExtra(EXTRA_YT_HEIGHT, 0)
+                    putExtra(EXTRA_MP3_BITRATE, mp3Bitrate)
+                    putExtra(EXTRA_USER_AGENT, userAgent)
+                    putExtra(EXTRA_BATCH_ID, batchId)
+                    putFolder(folderId, folderName)
+                }
+            )
+        }
+
         private fun Intent.putFolder(folderId: Long?, folderName: String?) {
             putExtra(EXTRA_FOLDER_ID, folderId ?: -1L)
             putExtra(EXTRA_FOLDER_NAME, folderName)
@@ -148,7 +216,9 @@ class DownloadService : Service() {
         val ytFormat: YtFormat = YtFormat.MP4,
         val ytHeight: Int = 0,
         val mp3Bitrate: Int = 192,
-        val userAgent: String = ""
+        val userAgent: String = "",
+        /** 0 when the download stands alone; see [DownloadService.cancelBatch]. */
+        val batchId: Long = 0L
     )
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -189,8 +259,17 @@ class DownloadService : Service() {
             stopIfIdle()
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_CANCEL_BATCH) {
+            intent.getLongExtra(EXTRA_BATCH_ID, 0L).takeIf { it != 0L }?.let { dropBatch(it) }
+            stopIfIdle()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_DOWNLOAD) {
-            val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
+            val playlistUrls = intent.getStringArrayListExtra(EXTRA_YT_URLS)
+            val playlistTitles = intent.getStringArrayListExtra(EXTRA_YT_TITLES)
+            val url = intent.getStringExtra(EXTRA_URL)
+                ?: playlistUrls?.firstOrNull()
+                ?: return START_NOT_STICKY
             @Suppress("UNCHECKED_CAST")
             val headers = (intent.getSerializableExtra(EXTRA_HEADERS) as? HashMap<String, String>)
                 ?: HashMap()
@@ -208,11 +287,32 @@ class DownloadService : Service() {
                 }.getOrDefault(YtFormat.MP4),
                 ytHeight = intent.getIntExtra(EXTRA_YT_HEIGHT, 0),
                 mp3Bitrate = intent.getIntExtra(EXTRA_MP3_BITRATE, 192),
-                userAgent = intent.getStringExtra(EXTRA_USER_AGENT).orEmpty()
+                userAgent = intent.getStringExtra(EXTRA_USER_AGENT).orEmpty(),
+                batchId = intent.getLongExtra(EXTRA_BATCH_ID, 0L)
             )
-            synchronized(lock) { pending.addLast(task) }
-            // Must enter foreground promptly after startForegroundService().
+            // One Intent can carry a whole playlist; [task] is the template the
+            // entries differ from only by URL and title.
+            val tasks = if (playlistUrls.isNullOrEmpty()) listOf(task)
+            else playlistUrls.mapIndexed { index, itemUrl ->
+                task.copy(
+                    url = itemUrl,
+                    title = playlistTitles?.getOrNull(index)?.takeIf { it.isNotBlank() } ?: "Video"
+                )
+            }
+
+            // Must enter foreground promptly after startForegroundService() —
+            // that holds even for items we are about to throw away.
             startForeground(NOTIF_ID, summaryNotification())
+
+            // A batch cancelled while its items were still being handed over:
+            // its queue entry is gone, so the stragglers are dropped.
+            if (task.batchId != 0L &&
+                DownloadQueueBus.state.value.none { it.id == task.batchId }
+            ) {
+                stopIfIdle()
+                return START_NOT_STICKY
+            }
+            synchronized(lock) { tasks.forEach { pending.addLast(it) } }
             pump()
         }
         return START_NOT_STICKY
@@ -249,6 +349,22 @@ class DownloadService : Service() {
         }
     }
 
+    /**
+     * Calls off every item of one playlist. Queued entries are simply dropped;
+     * the two or three already transferring go through the normal per-row
+     * cancel, which discards their partial files and library rows.
+     */
+    private fun dropBatch(batchId: Long) {
+        synchronized(lock) { pending.removeAll { it.batchId == batchId } }
+        DownloadQueueBus.remove(batchId)
+        batchOfVideo.entries
+            .filter { it.value == batchId }
+            .map { it.key }
+            .forEach { cancel(it) }
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIF_ID, summaryNotification())
+    }
+
     /** Tears the service down once nothing is left to transfer. */
     private fun stopIfIdle() {
         val idle = synchronized(lock) { active == 0 && pending.isEmpty() }
@@ -278,8 +394,14 @@ class DownloadService : Service() {
         // Publish this coroutine so the Library and the notification action can
         // stop it, then honour a cancel that raced the insert.
         currentCoroutineContext()[kotlinx.coroutines.Job]?.let { running[id] = it }
-        if (cancelledIds.remove(id)) {
+        if (task.batchId != 0L) batchOfVideo[id] = task.batchId
+        // The batch cancel only sees rows already in [batchOfVideo], so a job
+        // that started while it ran has to check for itself.
+        val batchGone = task.batchId != 0L &&
+            DownloadQueueBus.state.value.none { it.id == task.batchId }
+        if (cancelledIds.remove(id) || batchGone) {
             running.remove(id)
+            batchOfVideo.remove(id)
             dao.deleteById(id)
             return
         }
@@ -306,6 +428,7 @@ class DownloadService : Service() {
         }
 
         val scratch = mutableListOf<File>()
+        var downloaded = false
         try {
             val produced = when (task.kind) {
                 Kind.GENERIC -> runGeneric(task, id, scratch, report)
@@ -342,10 +465,11 @@ class DownloadService : Service() {
                             status = DownloadStatus.COMPLETED
                         )
                     )
-                    showDoneNotification(id, task.title, ok = true)
+                    downloaded = true
+                    notifyItemDone(task, id, ok = true)
                 } else {
                     dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
-                    showDoneNotification(id, task.title, ok = false)
+                    notifyItemDone(task, id, ok = false)
                 }
             }
         } catch (e: CancellationException) {
@@ -355,13 +479,29 @@ class DownloadService : Service() {
             withContext(NonCancellable) { dao.deleteById(id) }
             throw e
         } catch (e: Exception) {
-            withContext(NonCancellable) {
-                dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
+            // A cancel does not always arrive as a CancellationException: the
+            // HTTP layer turns a cancelled call into a plain IOException. What
+            // matters is whether this job was stopped, not what was thrown.
+            if (!currentCoroutineContext().isActive) {
+                withContext(NonCancellable) { dao.deleteById(id) }
+            } else {
+                withContext(NonCancellable) {
+                    dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
+                }
+                notifyItemDone(task, id, ok = false)
             }
-            showDoneNotification(id, task.title, ok = false)
         } finally {
             running.remove(id)
             cancelledIds.remove(id)
+            batchOfVideo.remove(id)
+            // Counts however it ended: a batch that finished with failures must
+            // still stop showing as in progress. The last item to land is the
+            // one that reports the playlist as a whole.
+            if (task.batchId != 0L) {
+                DownloadQueueBus.finished(task.batchId, ok = downloaded)
+                    ?.takeIf { it.remaining == 0 }
+                    ?.let { showBatchDoneNotification(it) }
+            }
             scratch.forEach { runCatching { it.delete() } }
             DownloadProgressBus.clear(id)
             nm.cancel(progressNotifId)
@@ -617,15 +757,32 @@ class DownloadService : Service() {
     /** The ongoing foreground notification summarising how many downloads run. */
     private fun summaryNotification(): Notification {
         val count = synchronized(lock) { active + pending.size }.coerceAtLeast(1)
-        val text = if (count == 1) "Downloading 1 video…" else "Downloading $count videos…"
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val batches = DownloadQueueBus.state.value
+        val single = batches.singleOrNull()
+        val text = when {
+            single != null ->
+                "${single.label} • ${single.finished}/${single.total}"
+            count == 1 -> "Downloading 1 video…"
+            else -> "Downloading $count videos…"
+        }
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("NSL Downloader")
             .setContentText(text)
             .setContentIntent(contentIntent())
             .setOnlyAlertOnce(true)
             .setOngoing(true)
-            .build()
+        // With one playlist running, the shade can call the whole thing off;
+        // with several there is no single obvious target, so the Library does it.
+        if (single != null) {
+            builder.setProgress(single.total, single.finished, false)
+                .addAction(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    getString(R.string.cancel_playlist),
+                    cancelBatchIntent(single.id)
+                )
+        }
+        return builder.build()
     }
 
     /** Stops the download filling row [videoId] straight from the shade. */
@@ -635,6 +792,18 @@ class DownloadService : Service() {
         Intent(this, DownloadService::class.java).apply {
             action = ACTION_CANCEL
             putExtra(EXTRA_VIDEO_ID, videoId)
+        },
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
+    /** Calls off the rest of a playlist straight from the shade. */
+    private fun cancelBatchIntent(batchId: Long): PendingIntent = PendingIntent.getService(
+        this,
+        // Batch ids share the request-code space with video ids; keep them apart.
+        (batchId + BATCH_REQUEST_OFFSET).toInt(),
+        Intent(this, DownloadService::class.java).apply {
+            action = ACTION_CANCEL_BATCH
+            putExtra(EXTRA_BATCH_ID, batchId)
         },
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
@@ -680,6 +849,35 @@ class DownloadService : Service() {
         }
     }
 
+    /**
+     * A playlist item does not get its own "complete" notification: 200 of them
+     * would bury the shade — and the ongoing summary, which is where the whole
+     * batch can be cancelled. [showBatchDoneNotification] reports the lot once.
+     */
+    private fun notifyItemDone(task: Task, id: Long, ok: Boolean) {
+        if (task.batchId == 0L) showDoneNotification(id, task.title, ok)
+    }
+
+    /** One line for a finished playlist, saying how many of it actually landed. */
+    private fun showBatchDoneNotification(batch: DownloadQueueBus.Batch) {
+        val text = if (batch.failed > 0) {
+            getString(
+                R.string.notif_playlist_done_failed, batch.label, batch.downloaded, batch.failed
+            )
+        } else {
+            getString(R.string.notif_playlist_done_ok, batch.label, batch.downloaded)
+        }
+        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(getString(R.string.notif_playlist_done))
+            .setContentText(text)
+            .setContentIntent(contentIntent())
+            .setAutoCancel(true)
+            .build()
+        getSystemService(NotificationManager::class.java)
+            .notify(BATCH_DONE_NOTIF_BASE + batch.id.toInt(), n)
+    }
+
     private fun showDoneNotification(id: Long, title: String, ok: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
         val n = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -700,6 +898,9 @@ class DownloadService : Service() {
         scope.cancel()
         running.clear()
         cancelledIds.clear()
+        batchOfVideo.clear()
+        // The queue died with the service, so nothing is left to cancel.
+        DownloadQueueBus.clear()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -46,7 +46,13 @@ object YouTubeResolver {
         val audioOptions: List<AudioOption>
     )
 
-    data class PlaylistItem(val title: String, val url: String)
+    data class PlaylistItem(
+        val title: String,
+        val url: String,
+        val durationSeconds: Long = 0,
+        val uploader: String = "",
+        val thumbnailUrl: String? = null
+    )
 
     data class ResolvedPlaylist(val title: String, val items: List<PlaylistItem>)
 
@@ -163,8 +169,16 @@ object YouTubeResolver {
     /**
      * Reads a whole playlist, following continuations up to [maxItems] entries
      * so long playlists do not stall the picker forever.
+     *
+     * [onProgress] is called with the running count after every page, both so
+     * the caller can show it and so it can abort a long read — throwing from
+     * the callback (e.g. `ensureActive()`) is the only way out between pages.
      */
-    fun resolvePlaylist(url: String, maxItems: Int = 200): ResolvedPlaylist {
+    fun resolvePlaylist(
+        url: String,
+        maxItems: Int = 200,
+        onProgress: (Int) -> Unit = {}
+    ): ResolvedPlaylist {
         val info = PlaylistInfo.getInfo(youTube, url)
         val items = mutableListOf<PlaylistItem>()
 
@@ -172,15 +186,23 @@ object YouTubeResolver {
             source.forEach { item ->
                 if (items.size >= maxItems) return
                 val itemUrl = item.url ?: return@forEach
-                items += PlaylistItem(item.name.orEmpty().ifBlank { "Untitled" }, itemUrl)
+                items += PlaylistItem(
+                    title = item.name.orEmpty().ifBlank { "Untitled" },
+                    url = itemUrl,
+                    durationSeconds = item.duration.coerceAtLeast(0),
+                    uploader = item.uploaderName.orEmpty(),
+                    thumbnailUrl = smallestThumbnail(item.thumbnails.orEmpty())
+                )
             }
         }
 
         collect(info.relatedItems)
+        onProgress(items.size)
         var page = info.nextPage
         while (page != null && items.size < maxItems) {
             val more = PlaylistInfo.getMoreItems(youTube, url, page)
             collect(more.items)
+            onProgress(items.size)
             page = more.nextPage
         }
 
@@ -189,6 +211,14 @@ object YouTubeResolver {
             items = items
         )
     }
+
+    /**
+     * The picker shows thumbnails at 72dp, so it takes the smallest rendition a
+     * playlist entry offers rather than pulling 200 full-size images. Height is
+     * [org.schabi.newpipe.extractor.Image.HEIGHT_UNKNOWN] on some entries.
+     */
+    private fun smallestThumbnail(images: List<org.schabi.newpipe.extractor.Image>): String? =
+        (images.filter { it.height > 0 }.minByOrNull { it.height } ?: images.firstOrNull())?.url
 
     /** Best audio first: prefer M4A/AAC (muxable + decodable), then bitrate. */
     private fun pickAudioStreams(streams: List<AudioStream>): List<AudioStream> =
