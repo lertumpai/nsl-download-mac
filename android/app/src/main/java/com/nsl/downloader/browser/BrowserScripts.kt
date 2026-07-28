@@ -136,11 +136,26 @@ object BrowserScripts {
     val RESUME_PIP_MEDIA = """
     (function () {
       var video = window.__nslPipVideo;
-      if (!video || !window.__nslPipWasPlaying || video.ended || !video.paused) return;
+      // The player can swap its <video> element (quality changes, ad breaks),
+      // which used to strand this on a detached node and silently give up.
+      if (!video || !video.isConnected) {
+        video = document.querySelector('video');
+        window.__nslPipVideo = video;
+      }
+      if (!video) return 'no-video';
+      if (!window.__nslPipWasPlaying) return 'not-ours';
+      if (video.ended) return 'ended';
+      if (!video.paused) return 'playing t=' + video.currentTime.toFixed(1);
       try {
         var play = video.play();
-        if (play && play.catch) play.catch(function () {});
-      } catch (e) {}
+        if (play && play.catch) {
+          play.catch(function (e) { window.__nslPipPlayError = '' + e; });
+        }
+      } catch (e) {
+        window.__nslPipPlayError = '' + e;
+      }
+      return 'resume ready=' + video.readyState + ' t=' + video.currentTime.toFixed(1) +
+             ' err=' + (window.__nslPipPlayError || 'none');
     })();
     """.trimIndent()
 
@@ -274,11 +289,7 @@ object BrowserScripts {
           'z-index:auto!important;isolation:auto!important;' +
           'mix-blend-mode:normal!important;' +
           'overflow:visible!important;clip:auto!important;clip-path:none!important}' +
-        '#__nsl_pip_backdrop{' +
-          'position:fixed!important;left:0!important;top:0!important;' +
-          'width:100vw!important;height:100vh!important;margin:0!important;' +
-          'background:#000!important;pointer-events:none!important;' +
-          'z-index:2147483646!important}' +
+        '.__nsl-pip-hidden{visibility:hidden!important}' +
         'video.__nsl-pip-video{' +
           'display:block!important;visibility:visible!important;opacity:1!important;' +
           'position:fixed!important;left:0!important;top:0!important;' +
@@ -286,16 +297,6 @@ object BrowserScripts {
           'height:' + height + '!important;max-width:none!important;max-height:none!important;' +
           'object-fit:contain!important;background:#000!important;' +
           'z-index:2147483647!important}';
-
-      // An opaque backdrop under the video, parented to <html> so it can never
-      // sit inside one of the page's own transformed subtrees. Without it any
-      // gap around the video shows the page itself — on YouTube, a white sheet.
-      var backdrop = document.getElementById('__nsl_pip_backdrop');
-      if (!backdrop) {
-        backdrop = document.createElement('div');
-        backdrop.id = '__nsl_pip_backdrop';
-        document.documentElement.appendChild(backdrop);
-      }
 
       document.documentElement.classList.add('__nsl-pip-root');
       if (document.body) document.body.classList.add('__nsl-pip-root');
@@ -310,6 +311,24 @@ object BrowserScripts {
       video.classList.add('__nsl-pip-video');
       video.style.removeProperty('transform');
       try { video.setAttribute('playsinline', ''); } catch (e) {}
+
+      // Hide everything that is not on the path to the video, walking up and
+      // hiding siblings at each level. Deliberately not a full-window backdrop
+      // element: that only works if it loses the z-index race against the
+      // video, and a stacking context anywhere in the player can flip that race
+      // and black the picture out. `visibility` cannot be outranked by page CSS
+      // and leaves the player's own layout (and playback) untouched.
+      document.querySelectorAll('.__nsl-pip-hidden').forEach(function (node) {
+        node.classList.remove('__nsl-pip-hidden');
+      });
+      for (var node = video; node && node !== document.body; node = node.parentElement) {
+        var parent = node.parentElement;
+        if (!parent) break;
+        for (var i = 0; i < parent.children.length; i++) {
+          var sibling = parent.children[i];
+          if (sibling !== node) sibling.classList.add('__nsl-pip-hidden');
+        }
+      }
 
       // Last line of defence: if some ancestor property we did not neutralise
       // still anchors the fixed video away from the window origin, translate it
@@ -328,7 +347,14 @@ object BrowserScripts {
           if (play && play.catch) play.catch(function () {});
         } catch (e) {}
       }
-      return 'video-ready ' + vw + 'x' + vh;
+
+      var placed = video.getBoundingClientRect();
+      return 'fit=$fill intrinsic=' + vw + 'x' + vh +
+             ' box=' + Math.round(placed.left) + ',' + Math.round(placed.top) +
+             ' ' + Math.round(placed.width) + 'x' + Math.round(placed.height) +
+             ' window=' + window.innerWidth + 'x' + window.innerHeight +
+             ' paused=' + video.paused + ' ready=' + video.readyState +
+             ' t=' + video.currentTime.toFixed(1);
     })();
     """.trimIndent()
 
@@ -354,12 +380,13 @@ object BrowserScripts {
       document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
         node.classList.remove('__nsl-pip-ancestor');
       });
+      document.querySelectorAll('.__nsl-pip-hidden').forEach(function (node) {
+        node.classList.remove('__nsl-pip-hidden');
+      });
       document.documentElement.classList.remove('__nsl-pip-root');
       if (document.body) document.body.classList.remove('__nsl-pip-root');
       var style = document.getElementById('__nsl_pip_fit');
       if (style) style.remove();
-      var backdrop = document.getElementById('__nsl_pip_backdrop');
-      if (backdrop) backdrop.remove();
       window.__nslPipVideo = null;
       window.__nslPipWasPlaying = false;
       return 'restored';

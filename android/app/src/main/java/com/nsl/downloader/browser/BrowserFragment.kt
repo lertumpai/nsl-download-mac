@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
+import android.util.Log
 import android.util.Rational
 import android.view.LayoutInflater
 import android.view.View
@@ -248,6 +249,14 @@ class BrowserFragment : Fragment() {
     private var pictureInPictureActive = false
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val stopPlaybackRunnable = Runnable { stopPlaybackServiceNow() }
+
+    /** Runs only if the PiP callback never arrived — see [onStop]. */
+    private val pipTeardownRunnable = Runnable {
+        if (_binding == null || isPictureInPicture()) return@Runnable
+        Log.d(PIP_TAG, "no PiP window arrived — restoring layout and pausing")
+        leavePictureInPictureLayout()
+        pauseAllMedia(notifyService = true)
+    }
     private val currentTab get() = tabs[currentTabIndex]
     private val currentWebView get() = currentTab.webView
 
@@ -288,22 +297,39 @@ class BrowserFragment : Fragment() {
             tabs.indexOfFirst { it.isPlaying }.takeIf { it >= 0 }?.let { switchToTab(it) }
         }
         tabs.forEach { it.webView.backgroundPlaybackEnabled = it === currentTab }
-        currentWebView.evaluateJavascript(BrowserScripts.MARK_PIP_VIDEO, null)
+        currentWebView.evalLogged("mark", BrowserScripts.MARK_PIP_VIDEO)
     }
 
     /**
      * PiP never happened (feature unavailable, or the system refused). Undo the
      * pre-arming from [onPause]: a hidden WebView must not be left playing audio
      * with no notification and no way to stop it.
+     *
+     * The teardown is deferred instead of running inline. With auto-enter the
+     * two callbacks race, and on the devices where `onStop` wins the inline
+     * version tore the PiP layout down and paused the video a moment *after*
+     * the floating window had already appeared — which is exactly what a black
+     * window showing a paused player looks like.
      */
     override fun onStop() {
         super.onStop()
         if (_binding == null || !prefs.pictureInPictureEnabled) return
         if (activity?.isChangingConfigurations == true) return
-        if (pictureInPictureActive) return
-        leavePictureInPictureLayout()
-        pauseAllMedia(notifyService = true)
+        if (isPictureInPicture()) return
+        uiHandler.removeCallbacks(pipTeardownRunnable)
+        uiHandler.postDelayed(pipTeardownRunnable, PIP_CALLBACK_GRACE_MS)
     }
+
+    override fun onStart() {
+        super.onStart()
+        uiHandler.removeCallbacks(pipTeardownRunnable)
+    }
+
+    /** True once the window really is floating, whichever callback got here first. */
+    private fun isPictureInPicture(): Boolean =
+        pictureInPictureActive ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                activity?.isInPictureInPictureMode == true)
 
     /**
      * Called just before the activity asks the system for a PiP window.
@@ -351,7 +377,7 @@ class BrowserFragment : Fragment() {
 
         currentWebView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
         currentWebView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
-        currentWebView.evaluateJavascript(fitScript, null)
+        currentWebView.evalLogged("fit", fitScript)
         currentWebView.requestLayout()
         currentWebView.invalidate()
     }
@@ -430,7 +456,7 @@ class BrowserFragment : Fragment() {
                 it.webView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
                 it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
             }
-            currentWebView.evaluateJavascript(BrowserScripts.RESUME_PIP_MEDIA, null)
+            currentWebView.evalLogged("resume", BrowserScripts.RESUME_PIP_MEDIA)
             // Belt and braces: if the transition still managed to pause the
             // video, start it again once the window has settled.
             resumeMediaSoon()
@@ -438,6 +464,14 @@ class BrowserFragment : Fragment() {
             leavePictureInPictureLayout()
         }
     }
+
+    /**
+     * PiP failures are invisible from the outside — the window is simply black —
+     * so every step reports what the page actually did. Watch with
+     * `adb logcat -s NSLPip`.
+     */
+    private fun WebView.evalLogged(label: String, js: String) =
+        evaluateJavascript(js) { result -> Log.d(PIP_TAG, "$label -> $result") }
 
     private fun leavePictureInPictureLayout() {
         pictureInPictureActive = false
@@ -465,7 +499,7 @@ class BrowserFragment : Fragment() {
                         // longer resumed; PiP is exactly that state.
                         tab.webView.onResume()
                         tab.webView.resumeTimers()
-                        tab.webView.evaluateJavascript(BrowserScripts.RESUME_PIP_MEDIA, null)
+                        tab.webView.evalLogged("resume+$delayMs", BrowserScripts.RESUME_PIP_MEDIA)
                     }
                 }
                 currentWebView.invalidate()
@@ -1247,5 +1281,10 @@ class BrowserFragment : Fragment() {
         /** Android refuses a PiP aspect ratio outside this range. */
         const val MAX_PIP_RATIO = 2.39f
         const val MIN_PIP_RATIO = 1f / 2.39f
+
+        /** How long `onStop` waits for a late PiP-mode callback. */
+        const val PIP_CALLBACK_GRACE_MS = 400L
+
+        const val PIP_TAG = "NSLPip"
     }
 }
