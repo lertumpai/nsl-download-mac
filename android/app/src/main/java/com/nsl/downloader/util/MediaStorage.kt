@@ -15,7 +15,7 @@ import java.io.File
 /**
  * Publishes finished downloads into a **real, user-visible** directory tree:
  *
- *     Download/NSL Downloader/[<library folder>]/<file>
+ *     Download/<root>/[<library folder>]/<file>   (root defaults to "NSL Downloader")
  *
  * The `Download` collection is used (rather than `Movies`/`Music`) because it is
  * the only MediaStore collection that accepts arbitrary MIME types, so MP4 and
@@ -32,7 +32,18 @@ import java.io.File
  */
 object MediaStorage {
 
-    const val ROOT = "NSL Downloader"
+    const val DEFAULT_ROOT = "NSL Downloader"
+
+    /**
+     * Top-level folder under `Download/`. Settings can change it; already
+     * published files keep the location stored on their library row, so only
+     * new downloads follow the new setting.
+     */
+    @Volatile
+    var root: String = DEFAULT_ROOT
+        set(value) {
+            field = value.takeIf { it.isNotBlank() } ?: DEFAULT_ROOT
+        }
 
     private val useMediaStore: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
@@ -44,14 +55,14 @@ object MediaStorage {
 
     /** e.g. `Download/NSL Downloader/Music videos` */
     fun relativeDir(folder: String?): String {
-        val base = "${Environment.DIRECTORY_DOWNLOADS}/$ROOT"
+        val base = "${Environment.DIRECTORY_DOWNLOADS}/$root"
         return if (folder.isNullOrBlank()) base else "$base/${sanitizeName(folder)}"
     }
 
     /** The same location as a [File], for pre-Q and for folder bookkeeping. */
     fun legacyDir(folder: String?): File {
         val base = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), ROOT
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), root
         )
         return if (folder.isNullOrBlank()) base else File(base, sanitizeName(folder))
     }

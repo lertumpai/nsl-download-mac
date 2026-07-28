@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true"
+    android:background="?attr/colorSurface">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="12dp">
+
+        <ImageButton
+            android:id="@+id/btnClose"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:contentDescription="@string/close" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/settings_title"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="24dp">
+
+            <TextView
+                style="@style/SettingsSection"
+                android:text="@string/settings_section_downloads" />
+
+            <LinearLayout android:id="@+id/rowConcurrent" style="@style/SettingsRow">
+                <TextView style="@style/SettingsRowTitle" android:text="@string/settings_concurrent" />
+                <TextView android:id="@+id/valueConcurrent" style="@style/SettingsRowValue" />
+            </LinearLayout>
+
+            <LinearLayout android:id="@+id/rowSpeed" style="@style/SettingsRow">
+                <TextView style="@style/SettingsRowTitle" android:text="@string/settings_speed_limit" />
+                <TextView android:id="@+id/valueSpeed" style="@style/SettingsRowValue" />
+            </LinearLayout>
+
+            <LinearLayout android:id="@+id/rowFolder" style="@style/SettingsRow">
+                <TextView style="@style/SettingsRowTitle" android:text="@string/settings_folder" />
+                <TextView android:id="@+id/valueFolder" style="@style/SettingsRowValue" />
+            </LinearLayout>
+
+            <TextView
+                style="@style/SettingsSection"
+                android:text="@string/settings_section_media" />
+
+            <LinearLayout android:id="@+id/rowBitrate" style="@style/SettingsRow">
+                <TextView style="@style/SettingsRowTitle" android:text="@string/settings_bitrate" />
+                <TextView android:id="@+id/valueBitrate" style="@style/SettingsRowValue" />
+            </LinearLayout>
+
+            <LinearLayout android:id="@+id/rowPlayback" style="@style/SettingsRow">
+                <TextView style="@style/SettingsRowTitle" android:text="@string/menu_playback_mode" />
+                <TextView android:id="@+id/valuePlayback" style="@style/SettingsRowValue" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>

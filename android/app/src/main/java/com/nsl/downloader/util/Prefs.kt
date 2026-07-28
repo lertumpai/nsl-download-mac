@@ -60,11 +60,45 @@ class Prefs(context: Context) {
         get() = sp.getInt(KEY_MP3_BITRATE, 192)
         set(value) = sp.edit().putInt(KEY_MP3_BITRATE, value).apply()
 
+    /** How many downloads may transfer at once; the rest queue. */
+    var maxConcurrentDownloads: Int
+        get() = sp.getInt(KEY_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT).coerceIn(1, 6)
+        set(value) = sp.edit().putInt(KEY_MAX_CONCURRENT, value.coerceIn(1, 6)).apply()
+
+    /** Whole-app download cap in bytes/sec; 0 is unlimited. */
+    var speedLimitBytesPerSecond: Long
+        get() = sp.getLong(KEY_SPEED_LIMIT, 0L).coerceAtLeast(0L)
+        set(value) = sp.edit().putLong(KEY_SPEED_LIMIT, value.coerceAtLeast(0L)).apply()
+
+    /** Folder under `Download/` that finished files are published into. */
+    var downloadFolderName: String
+        get() = sp.getString(KEY_DOWNLOAD_FOLDER, null)?.takeIf { it.isNotBlank() }
+            ?: MediaStorage.DEFAULT_ROOT
+        set(value) {
+            val clean = MediaStorage.sanitizeName(value).ifBlank { MediaStorage.DEFAULT_ROOT }
+            sp.edit().putString(KEY_DOWNLOAD_FOLDER, clean).apply()
+            MediaStorage.root = clean
+        }
+
     private companion object {
         const val KEY_AD_BLOCK = "ad_block"
         const val KEY_BACKGROUND_PLAYBACK = "background_playback"
         const val KEY_PLAYBACK_MODE = "playback_mode"
         const val KEY_FOOTER_COLLAPSED = "footer_collapsed"
         const val KEY_MP3_BITRATE = "mp3_bitrate"
+        const val KEY_MAX_CONCURRENT = "max_concurrent"
+        const val KEY_SPEED_LIMIT = "speed_limit"
+        const val KEY_DOWNLOAD_FOLDER = "download_folder"
+        const val DEFAULT_MAX_CONCURRENT = 3
     }
+}
+
+/**
+ * Pushes the stored download settings into the objects that enforce them.
+ * Both entry points into the app (the activity and the download service) call
+ * this, since either can be the first thing the system starts.
+ */
+fun Prefs.applyDownloadSettings() {
+    MediaStorage.root = downloadFolderName
+    RateLimiter.bytesPerSecond = speedLimitBytesPerSecond
 }

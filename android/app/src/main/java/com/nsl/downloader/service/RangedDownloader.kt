@@ -9,6 +9,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import com.nsl.downloader.util.RateLimiter
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -37,7 +39,14 @@ class RangedDownloader(base: OkHttpClient) {
     companion object {
         /** Range requests in flight at once, i.e. sockets per download. */
         private const val CONNECTIONS = 6
-        private const val CHUNK_SIZE = 4L shl 20   // 4 MB per range request
+
+        /**
+         * Kept small on purpose. Google's CDN serves the head of every response
+         * at full speed and then shapes the rest towards playback rate, so the
+         * useful trick is to keep asking for fresh, short ranges rather than to
+         * ride one long response down to a trickle.
+         */
+        private const val CHUNK_SIZE = 2L shl 20   // 2 MB per range request
         private const val BUFFER_SIZE = 1 shl 16   // 64 KB
         private const val MAX_ATTEMPTS = 3
         private const val RETRY_DELAY_MS = 300L
@@ -55,7 +64,21 @@ class RangedDownloader(base: OkHttpClient) {
         .protocols(listOf(Protocol.HTTP_1_1))
         .build()
 
-    private data class Probe(val length: Long, val acceptsRanges: Boolean)
+    /**
+     * How a byte range is asked for.
+     *
+     * Google's video CDN honours a `range=start-end` **query parameter** as well
+     * as the HTTP header, and only the query form reliably escapes the shaping
+     * it applies to a long-running response — the same reason yt-dlp asks for
+     * its chunks that way.
+     */
+    private enum class RangeMode { HEADER, QUERY }
+
+    private data class Probe(
+        val length: Long,
+        val acceptsRanges: Boolean,
+        val mode: RangeMode = RangeMode.HEADER
+    )
 
     suspend fun download(
         url: String,
@@ -65,19 +88,25 @@ class RangedDownloader(base: OkHttpClient) {
     ): Boolean {
         val probe = probe(url, headers)
         if (probe != null && probe.acceptsRanges && probe.length >= MIN_PARALLEL_BYTES) {
-            if (downloadRanged(url, output, headers, probe.length, onProgress)) return true
+            if (downloadRanged(url, output, headers, probe.length, probe.mode, onProgress)) {
+                return true
+            }
             // A CDN can advertise ranges and still fall over under concurrent
-            // reads; one plain pass is the safety net.
+            // reads; one plain pass is the safety net. It is genuinely slower —
+            // a single shaped response — so the ranged path retries hard before
+            // giving up on it (see [downloadRanged]).
             currentCoroutineContext().ensureActive()
         }
         return downloadWhole(url, output, headers, onProgress)
     }
 
-    /** A one-byte GET: reveals the total size and whether ranges are honoured. */
+    /** A one-byte GET: reveals the total size and how ranges may be asked for. */
     private suspend fun probe(url: String, headers: Map<String, String>): Probe? =
         withContext(Dispatchers.IO) {
             try {
-                useCall(client.newCall(buildRequest(url, headers, 0, 0))) { response ->
+                val viaHeader = useCall(
+                    client.newCall(buildRequest(url, headers, 0, 0, RangeMode.HEADER))
+                ) { response ->
                     when {
                         response.code == 206 -> {
                             // Content-Range: bytes 0-0/123456
@@ -88,7 +117,19 @@ class RangedDownloader(base: OkHttpClient) {
                         response.isSuccessful -> Probe(response.body?.contentLength() ?: -1L, false)
                         else -> null
                     }
+                } ?: return@withContext null
+
+                if (!supportsRangeParam(url)) return@withContext viaHeader
+                // Confirm the query form really slices before trusting it with
+                // real chunks: a server that ignores it answers with the whole
+                // file, which would be written at the wrong offset.
+                val sliced = useCall(
+                    client.newCall(buildRequest(url, headers, 0, 0, RangeMode.QUERY))
+                ) { response ->
+                    response.isSuccessful && response.body?.contentLength() == 1L
                 }
+                if (sliced == true) viaHeader.copy(acceptsRanges = true, mode = RangeMode.QUERY)
+                else viaHeader
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -96,16 +137,29 @@ class RangedDownloader(base: OkHttpClient) {
             }
         }
 
+    private fun supportsRangeParam(url: String): Boolean =
+        runCatching { url.toHttpUrl().host.endsWith("googlevideo.com") }.getOrDefault(false)
+
+    private class Chunk(val start: Long, val end: Long) {
+        var attempts = 0
+    }
+
     /**
      * Splits [total] into chunks handed out to [CONNECTIONS] workers. Each
      * worker owns its own file handle and seeks to the offset it is filling,
      * so no write ordering or buffering between them is needed.
+     *
+     * A chunk that fails goes back in the queue instead of sinking the whole
+     * pass: giving up here means restarting as one plain, CDN-shaped response,
+     * which is what a download collapsing to a few KB/s after a fast start
+     * actually looks like.
      */
     private suspend fun downloadRanged(
         url: String,
         output: File,
         headers: Map<String, String>,
         total: Long,
+        mode: RangeMode,
         onProgress: (Int, Long) -> Unit
     ): Boolean = coroutineScope {
         try {
@@ -114,13 +168,20 @@ class RangedDownloader(base: OkHttpClient) {
             return@coroutineScope false
         }
 
-        val cursor = AtomicLong(0)
+        val queue = java.util.concurrent.ConcurrentLinkedQueue<Chunk>()
+        var offset = 0L
+        while (offset < total) {
+            queue.add(Chunk(offset, minOf(offset + CHUNK_SIZE, total) - 1))
+            offset += CHUNK_SIZE
+        }
+
         val done = AtomicLong(0)
+        val exhausted = java.util.concurrent.atomic.AtomicBoolean(false)
         val reportLock = Any()
         // Workers report from several threads and the callback downstream keeps
         // running state (speed meter, notification), so serialise it here.
-        val onBytes: (Int) -> Unit = { read ->
-            val soFar = done.addAndGet(read.toLong())
+        val report: () -> Unit = {
+            val soFar = done.get()
             synchronized(reportLock) { onProgress((soFar * 100 / total).toInt(), soFar) }
         }
 
@@ -128,46 +189,80 @@ class RangedDownloader(base: OkHttpClient) {
             async(Dispatchers.IO) {
                 RandomAccessFile(output, "rw").use { raf ->
                     val buffer = ByteArray(BUFFER_SIZE)
-                    var healthy = true
-                    while (healthy) {
-                        val start = cursor.getAndAdd(CHUNK_SIZE)
-                        if (start >= total) break
-                        val end = minOf(start + CHUNK_SIZE, total) - 1
-                        healthy = fetchRange(url, headers, start, end, raf, buffer, onBytes)
+                    while (!exhausted.get()) {
+                        val chunk = queue.poll() ?: break
+                        var written = 0L
+                        val ok = fetchRange(url, headers, chunk, mode, raf, buffer) { read ->
+                            written += read
+                            done.addAndGet(read.toLong())
+                            report()
+                        }
+                        if (ok) continue
+
+                        // Roll the partial back out of the progress before the
+                        // retry re-reads the same bytes.
+                        done.addAndGet(-written)
+                        report()
+                        if (++chunk.attempts >= MAX_ATTEMPTS) {
+                            exhausted.set(true)
+                            break
+                        }
+                        delay(RETRY_DELAY_MS * chunk.attempts)
+                        queue.add(chunk)
                     }
-                    healthy
                 }
             }
-        }.awaitAll().all { it }
+        }.awaitAll()
+
+        !exhausted.get() && queue.isEmpty() && done.get() >= total
     }
 
     /**
-     * Pulls [start]..[end] into [raf]. A failure part way through is retried
-     * from wherever it stopped rather than from the head of the chunk.
+     * Pulls one [chunk] into [raf]. A failure part way through is retried from
+     * wherever it stopped rather than from the head of the chunk.
      */
     private suspend fun fetchRange(
         url: String,
         headers: Map<String, String>,
-        start: Long,
-        end: Long,
+        chunk: Chunk,
+        mode: RangeMode,
         raf: RandomAccessFile,
         buffer: ByteArray,
         onBytes: (Int) -> Unit
     ): Boolean {
-        var pos = start
+        var pos = chunk.start
+        val end = chunk.end
         var attempts = 0
         while (pos <= end) {
             currentCoroutineContext().ensureActive()
             try {
-                useCall(client.newCall(buildRequest(url, headers, pos, end))) { response ->
-                    if (response.code != 206) throw IOException("range rejected: ${response.code}")
+                useCall(client.newCall(buildRequest(url, headers, pos, end, mode))) { response ->
+                    val expected = end - pos + 1
+                    when (mode) {
+                        RangeMode.HEADER ->
+                            if (response.code != 206) {
+                                throw IOException("range rejected: ${response.code}")
+                            }
+                        // A server that ignored the parameter answers with the
+                        // whole file; writing that at [pos] would corrupt the
+                        // output, so the length has to match exactly.
+                        RangeMode.QUERY ->
+                            if (!response.isSuccessful ||
+                                response.body?.contentLength() != expected
+                            ) {
+                                throw IOException("range param ignored: ${response.code}")
+                            }
+                    }
                     val stream = response.body?.byteStream() ?: throw IOException("empty body")
-                    while (true) {
-                        val read = stream.read(buffer)
+                    var remaining = expected
+                    while (remaining > 0) {
+                        val read = stream.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
                         if (read <= 0) break
+                        RateLimiter.acquire(read)
                         raf.seek(pos)
                         raf.write(buffer, 0, read)
                         pos += read
+                        remaining -= read
                         onBytes(read)
                     }
                 }
@@ -205,6 +300,7 @@ class RangedDownloader(base: OkHttpClient) {
                         while (true) {
                             val read = input.read(buffer)
                             if (read <= 0) break
+                            RateLimiter.acquire(read)
                             out.write(buffer, 0, read)
                             downloaded += read
                             // Unknown total (chunked) → indeterminate percent (-1).
@@ -228,9 +324,17 @@ class RangedDownloader(base: OkHttpClient) {
         url: String,
         headers: Map<String, String>,
         start: Long?,
-        end: Long?
-    ): Request = Request.Builder().url(url).apply {
-        headers.forEach { (k, v) -> if (v.isNotBlank()) header(k, v) }
-        if (start != null) header("Range", "bytes=$start-${end ?: ""}")
-    }.build()
+        end: Long?,
+        mode: RangeMode = RangeMode.HEADER
+    ): Request {
+        val useParam = mode == RangeMode.QUERY && start != null && end != null
+        val target = if (!useParam) url else runCatching {
+            url.toHttpUrl().newBuilder().setQueryParameter("range", "$start-$end").build().toString()
+        }.getOrDefault(url)
+
+        return Request.Builder().url(target).apply {
+            headers.forEach { (k, v) -> if (v.isNotBlank()) header(k, v) }
+            if (start != null && !useParam) header("Range", "bytes=$start-${end ?: ""}")
+        }.build()
+    }
 }

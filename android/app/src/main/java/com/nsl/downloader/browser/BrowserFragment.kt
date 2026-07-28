@@ -26,6 +26,7 @@ import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.service.HlsDownloader
 import com.nsl.downloader.service.PlaybackBus
 import com.nsl.downloader.service.PlaybackService
+import com.nsl.downloader.settings.SettingsActivity
 import com.nsl.downloader.util.PlaybackMode
 import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.detectVideoType
@@ -172,13 +173,17 @@ class BrowserFragment : Fragment() {
 
         /**
          * The media reporter always goes in — both the playback service and the
-         * PiP trigger depend on it. The visibility-pinning half is specific to
-         * background audio.
+         * PiP trigger depend on it.
+         *
+         * The visibility-pinning half is needed by both non-OFF modes: page
+         * scripts (YouTube's included) pause themselves on `visibilitychange`,
+         * and entering Picture-in-Picture looks exactly like that to the page.
          */
         fun injectBackgroundScript(view: WebView?) {
             view?.evaluateJavascript(BrowserScripts.MEDIA_STATE, null)
-            if (!prefs.backgroundPlaybackEnabled) return
+            if (prefs.playbackMode == PlaybackMode.OFF) return
             view?.evaluateJavascript(BrowserScripts.BACKGROUND_PLAYBACK, null)
+            view?.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
         }
 
         fun injectAdBlockScript(view: WebView?) {
@@ -232,6 +237,18 @@ class BrowserFragment : Fragment() {
     fun hasPlayingMedia(): Boolean = tabs.any { it.isPlaying }
 
     /**
+     * Called just before the activity asks the system for a PiP window.
+     *
+     * The window goes away for the length of the transition, and Chromium pauses
+     * every media element as soon as it does — the pause comes from the browser,
+     * so the page-level hooks cannot stop it. Pinning the reported visibility
+     * first is what keeps the video running into the floating window.
+     */
+    fun onEnteringPictureInPicture() {
+        tabs.forEach { it.webView.backgroundPlaybackEnabled = true }
+    }
+
+    /**
      * In a PiP window only the page itself is shown. FragmentActivity dispatches
      * this for us when the activity's own callback runs.
      */
@@ -241,6 +258,44 @@ class BrowserFragment : Fragment() {
         binding.topBar.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
         binding.progressBar.visibility = View.GONE
         if (isInPictureInPictureMode) binding.fabDownload.hide() else updateFab()
+
+        if (isInPictureInPictureMode) {
+            // The page may not pause itself while it floats over another app:
+            // YouTube calls pause() several times a second in this state.
+            tabs.forEach {
+                it.webView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
+                it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
+            }
+            // Belt and braces: if the transition still managed to pause the
+            // video, start it again once the window has settled.
+            resumeMediaSoon()
+        } else {
+            tabs.forEach {
+                it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(false), null)
+            }
+            // Back to a normal window: only background mode may keep pinning
+            // visibility, otherwise media should pause when the app goes away.
+            val pin = prefs.backgroundPlaybackEnabled
+            tabs.forEach { it.webView.backgroundPlaybackEnabled = pin }
+        }
+    }
+
+    private fun resumeMediaSoon() {
+        listOf(150L, 600L, 1500L, 3000L).forEach { delayMs ->
+            uiHandler.postDelayed({
+                if (!isAdded) return@postDelayed
+                tabs.forEach { tab ->
+                    if (tab.isPlaying || tab === currentTab) {
+                        // Chromium can suspend a WebView whose activity is no
+                        // longer resumed; PiP is exactly that state.
+                        tab.webView.onResume()
+                        tab.webView.resumeTimers()
+                        tab.webView.evaluateJavascript(BrowserScripts.RESUME_MEDIA, null)
+                    }
+                }
+                currentWebView.invalidate()
+            }, delayMs)
+        }
     }
 
     /** Collapsing the footer shrinks the download button to its icon. */
@@ -440,6 +495,7 @@ class BrowserFragment : Fragment() {
         popup.menu.add(0, MENU_PLAYBACK_MODE, 1, getString(R.string.menu_playback_mode))
         popup.menu.add(0, MENU_NEW_TAB, 2, getString(R.string.tab_new))
         popup.menu.add(0, MENU_TOGGLE_FOOTER, 3, getString(R.string.menu_toggle_footer))
+        popup.menu.add(0, MENU_SETTINGS, 4, getString(R.string.menu_settings))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_AD_BLOCK -> {
@@ -452,6 +508,9 @@ class BrowserFragment : Fragment() {
                 MENU_TOGGLE_FOOTER -> (activity as? com.nsl.downloader.MainActivity)?.let {
                     it.setFooterCollapsed(!it.isFooterCollapsed())
                 }
+                MENU_SETTINGS -> startActivity(
+                    Intent(requireContext(), SettingsActivity::class.java)
+                )
             }
             true
         }
@@ -562,36 +621,76 @@ class BrowserFragment : Fragment() {
 
     // ----------------------------------------------------------- YouTube UI
 
-    /** Format / playlist chooser for a YouTube page. */
+    /**
+     * Entry point for a YouTube page. What gets asked depends on what the page
+     * actually is:
+     *
+     *  - a video that also sits in a playlist → *what* first (this one or all
+     *    of them), then the format. Offering all four combinations at once made
+     *    "Video (MP4)" and "Whole playlist as MP4" look like variants of the
+     *    same thing.
+     *  - a plain video → just the format.
+     *  - a playlist page → the format, then the per-video picker.
+     */
     private fun showYouTubeDialog(pageUrl: String, pageTitle: String) {
         val playlistId = YouTubeResolver.playlistIdOf(pageUrl)
-        val isPlaylistPage = YouTubeResolver.classify(pageUrl) == YouTubeResolver.Kind.PLAYLIST
-        val isStream = YouTubeResolver.classify(pageUrl) == YouTubeResolver.Kind.STREAM
-
-        val actions = buildList<Pair<String, () -> Unit>> {
-            if (isStream) {
-                add(getString(R.string.yt_video_mp4) to { chooseMp4Quality(pageUrl, pageTitle) })
-                add(getString(R.string.yt_audio_mp3) to { chooseMp3Bitrate(pageUrl, pageTitle) })
-            }
-            if (isPlaylistPage || playlistId != null) {
-                val listUrl = if (isPlaylistPage) pageUrl
-                else YouTubeResolver.playlistUrlFor(playlistId!!)
-                add(getString(R.string.yt_playlist_mp4) to {
-                    downloadPlaylist(listUrl, DownloadService.YtFormat.MP4)
-                })
-                add(getString(R.string.yt_playlist_mp3) to {
-                    downloadPlaylist(listUrl, DownloadService.YtFormat.MP3)
-                })
-            }
+        val kind = YouTubeResolver.classify(pageUrl)
+        val isPlaylistPage = kind == YouTubeResolver.Kind.PLAYLIST
+        val isStream = kind == YouTubeResolver.Kind.STREAM
+        val listUrl = when {
+            isPlaylistPage -> pageUrl
+            playlistId != null -> YouTubeResolver.playlistUrlFor(playlistId)
+            else -> null
         }
 
-        if (actions.isEmpty()) {
-            showVideoPicker()
-            return
+        when {
+            isStream && listUrl != null -> chooseScope(pageUrl, pageTitle, listUrl)
+            isStream -> chooseSingleFormat(pageUrl, pageTitle)
+            listUrl != null -> choosePlaylistFormat(listUrl)
+            else -> showVideoPicker()
         }
+    }
 
+    /** One video, or every video in the list it belongs to. */
+    private fun chooseScope(pageUrl: String, pageTitle: String, listUrl: String) {
+        val actions = listOf<Pair<String, () -> Unit>>(
+            getString(R.string.yt_scope_single) to { chooseSingleFormat(pageUrl, pageTitle) },
+            getString(R.string.yt_scope_playlist) to { choosePlaylistFormat(listUrl) }
+        )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_scope_title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun chooseSingleFormat(pageUrl: String, pageTitle: String) {
+        val actions = listOf<Pair<String, () -> Unit>>(
+            getString(R.string.yt_video_mp4) to { chooseMp4Quality(pageUrl, pageTitle) },
+            getString(R.string.yt_audio_mp3) to { chooseMp3Bitrate(pageUrl, pageTitle) }
+        )
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.yt_download_title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun choosePlaylistFormat(listUrl: String) {
+        val actions = listOf<Pair<String, () -> Unit>>(
+            getString(R.string.yt_playlist_mp4) to {
+                downloadPlaylist(listUrl, DownloadService.YtFormat.MP4)
+            },
+            getString(R.string.yt_playlist_mp3) to {
+                downloadPlaylist(listUrl, DownloadService.YtFormat.MP3)
+            }
+        )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_playlist_format_title)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions[which].second()
             }
@@ -753,28 +852,82 @@ class BrowserFragment : Fragment() {
 
     // ------------------------------------------------------ sniffed videos
 
+    /**
+     * One detected stream needs no list — it goes straight to the quality step.
+     * Several get checkboxes, because a page that exposes more than one is
+     * usually a page where the user wants more than one.
+     */
     private fun showVideoPicker() {
         val videos = currentTab.sniffer.snapshot()
-        if (videos.isEmpty()) {
-            Toast.makeText(requireContext(), "No videos detected yet", Toast.LENGTH_SHORT).show()
-            return
+        when {
+            videos.isEmpty() ->
+                Toast.makeText(requireContext(), R.string.no_videos_detected, Toast.LENGTH_SHORT)
+                    .show()
+            videos.size == 1 -> onVideoChosen(videos.first())
+            else -> showMultiVideoPicker(videos)
         }
-        val labels = videos.map { c ->
+    }
+
+    private fun showMultiVideoPicker(videos: List<VideoSniffer.Candidate>) {
+        val labels = videos.map { candidate ->
             val type = when {
-                c.url.contains(".m3u8") -> "[HLS] "
-                c.url.contains(".mpd") -> "[DASH] "
+                candidate.url.contains(".m3u8") -> "[HLS] "
+                candidate.url.contains(".mpd") -> "[DASH] "
                 else -> "[Direct] "
             }
-            type + c.url.substringBefore('?').substringAfterLast('/').take(40)
+            type + candidate.url.substringBefore('?').substringAfterLast('/').take(40)
         }.toTypedArray()
+        val checked = BooleanArray(videos.size)
 
-        MaterialAlertDialogBuilder(requireContext())
-            .setTitle("Detected videos")
-            .setItems(labels) { _, which ->
-                onVideoChosen(videos[which])
+        val dialog = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(getString(R.string.detected_videos, videos.size))
+            .setMultiChoiceItems(labels, checked) { _, _, _ -> }
+            .setPositiveButton(R.string.download, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+
+        // Bound by hand so the count can ride on the button and an empty
+        // selection cannot dismiss the dialog.
+        dialog.setOnShowListener {
+            val button = dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+            fun sync() {
+                val count = checked.count { it }
+                button.isEnabled = count > 0
+                button.text = getString(R.string.yt_playlist_download_n, count)
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            sync()
+            dialog.listView.setOnItemClickListener { _, _, position, _ ->
+                checked[position] = dialog.listView.isItemChecked(position)
+                sync()
+            }
+            button.setOnClickListener {
+                val picked = videos.filterIndexed { index, _ -> checked[index] }
+                if (picked.isEmpty()) return@setOnClickListener
+                dialog.dismiss()
+                // A single pick still gets the quality step; a batch would mean
+                // one dialog per item, so those take the best variant as-is.
+                if (picked.size == 1) onVideoChosen(picked.first()) else downloadAll(picked)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun downloadAll(candidates: List<VideoSniffer.Candidate>) {
+        val pageTitle = currentWebView.title ?: guessTitleFromUrl(currentWebView.url.orEmpty())
+        candidates.forEachIndexed { index, candidate ->
+            DownloadService.start(
+                requireContext(),
+                candidate.url,
+                if (candidates.size == 1) pageTitle else "$pageTitle (${index + 1})",
+                buildHeaders(candidate.url, candidate.headers)
+            )
+        }
+        Toast.makeText(
+            requireContext(),
+            getString(R.string.yt_playlist_queued, candidates.size),
+            Toast.LENGTH_SHORT
+        ).show()
+        (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
     }
 
     private fun onVideoChosen(candidate: VideoSniffer.Candidate) {
@@ -877,6 +1030,7 @@ class BrowserFragment : Fragment() {
         const val MENU_PLAYBACK_MODE = 2
         const val MENU_NEW_TAB = 3
         const val MENU_TOGGLE_FOOTER = 4
+        const val MENU_SETTINGS = 5
 
         /** Grace period before the playback service is torn down. */
         const val PLAYBACK_STOP_DELAY_MS = 30_000L

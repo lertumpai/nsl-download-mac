@@ -48,6 +48,12 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:theme="@style/Theme.NSLDownloader.NoActionBar" />
 
+        <activity
+            android:name=".settings.SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".service.DownloadService"
             android:exported="false"

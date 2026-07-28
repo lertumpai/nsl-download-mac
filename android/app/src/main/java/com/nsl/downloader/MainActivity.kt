@@ -26,8 +26,16 @@ import com.nsl.downloader.util.Prefs
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private val browserFragment = BrowserFragment()
-    private val libraryFragment = LibraryFragment()
+
+    /**
+     * Resolved in [onCreate], never constructed as field initialisers: after the
+     * activity is recreated (a Picture-in-Picture round trip can do it) the
+     * fragments that are actually on screen are the ones the FragmentManager
+     * restored. Holding freshly built instances instead left the UI wired to
+     * fragments that were never attached — the Library stopped updating.
+     */
+    private lateinit var browserFragment: BrowserFragment
+    private lateinit var libraryFragment: LibraryFragment
     private val prefs by lazy { Prefs(this) }
 
     /** Set while a page is showing a fullscreen <video>. */
@@ -49,10 +57,14 @@ class MainActivity : AppCompatActivity() {
         requestNotifPermission()
         requestLegacyStoragePermission()
 
-        if (savedInstanceState == null) {
+        val restoredBrowser = supportFragmentManager.findFragmentByTag(TAG_BROWSER)
+        val restoredLibrary = supportFragmentManager.findFragmentByTag(TAG_LIBRARY)
+        browserFragment = restoredBrowser as? BrowserFragment ?: BrowserFragment()
+        libraryFragment = restoredLibrary as? LibraryFragment ?: LibraryFragment()
+        if (restoredBrowser == null || restoredLibrary == null) {
             supportFragmentManager.beginTransaction()
-                .add(R.id.fragmentContainer, libraryFragment, "library").hide(libraryFragment)
-                .add(R.id.fragmentContainer, browserFragment, "browser")
+                .add(R.id.fragmentContainer, libraryFragment, TAG_LIBRARY).hide(libraryFragment)
+                .add(R.id.fragmentContainer, browserFragment, TAG_BROWSER)
                 .commit()
         }
 
@@ -184,6 +196,9 @@ class MainActivity : AppCompatActivity() {
         if (!isBrowserVisible() || !browserFragment.hasPlayingMedia()) return
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
 
+        // Order matters: the fragment pins media visibility *before* the window
+        // is handed over, otherwise Chromium pauses the video mid-transition.
+        browserFragment.onEnteringPictureInPicture()
         runCatching {
             enterPictureInPictureMode(
                 PictureInPictureParams.Builder()
@@ -229,6 +244,11 @@ class MainActivity : AppCompatActivity() {
      * `onBackPressed()` override is no longer invoked — back has to go through
      * the dispatcher or fullscreen exit and in-page history both stop working.
      */
+    private companion object {
+        const val TAG_BROWSER = "browser"
+        const val TAG_LIBRARY = "library"
+    }
+
     private fun registerBackHandler() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {

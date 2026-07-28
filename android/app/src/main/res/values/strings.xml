@@ -54,6 +54,12 @@
 
     <!-- YouTube -->
     <string name="yt_download_title">Download from YouTube</string>
+    <string name="yt_scope_title">What do you want to download?</string>
+    <string name="yt_scope_single">Just this video</string>
+    <string name="yt_scope_playlist">The whole playlist…</string>
+    <string name="yt_playlist_format_title">Download playlist as…</string>
+    <string name="detected_videos">Detected videos (%1$d)</string>
+    <string name="no_videos_detected">No videos detected yet</string>
     <string name="yt_video_mp4">Video (MP4)</string>
     <string name="yt_audio_mp3">Audio (MP3)</string>
     <string name="yt_playlist_mp4">Whole playlist as MP4</string>
@@ -71,6 +77,24 @@
     <string name="yt_playlist_download_n">Download (%1$d)</string>
     <string name="yt_playlist_queued">Queued %1$d downloads</string>
     <string name="yt_merged">video + audio merged</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="menu_settings">Settings</string>
+    <string name="settings_section_downloads">Downloads</string>
+    <string name="settings_section_media">Media</string>
+    <string name="settings_concurrent">Downloads at the same time</string>
+    <plurals name="settings_concurrent_value">
+        <item quantity="one">%1$d at a time</item>
+        <item quantity="other">%1$d at a time</item>
+    </plurals>
+    <string name="settings_speed_limit">Speed limit</string>
+    <string name="settings_speed_unlimited">Unlimited</string>
+    <string name="settings_folder">Save downloads to</string>
+    <string name="settings_folder_value">Download/%1$s</string>
+    <string name="settings_folder_hint">Folder name inside the device\'s Download directory. Files already downloaded stay where they are.</string>
+    <string name="settings_folder_reset">Reset</string>
+    <string name="settings_bitrate">MP3 bitrate</string>
 
     <!-- Library folders -->
     <string name="library_all">All</string>

@@ -15,6 +15,7 @@ import com.nsl.downloader.data.DownloadQueueBus
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.util.MediaStorage
+import com.nsl.downloader.util.applyDownloadSettings
 import com.nsl.downloader.util.VideoType
 import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.youtube.YouTubeResolver
@@ -52,7 +53,7 @@ class DownloadService : Service() {
         const val PROGRESS_NOTIF_BASE = 20000 // per-download progress
         const val DONE_NOTIF_BASE = 30000     // per-download complete/failed
         const val BATCH_DONE_NOTIF_BASE = 40000 // per-playlist complete
-        const val MAX_CONCURRENT = 3          // simultaneous downloads
+        const val MAX_CONCURRENT = 3          // default; Settings can change it
 
         /** Keeps batch PendingIntent request codes clear of the video-id ones. */
         private const val BATCH_REQUEST_OFFSET = 100_000L
@@ -221,6 +222,11 @@ class DownloadService : Service() {
         val batchId: Long = 0L
     )
 
+    private val prefs by lazy { com.nsl.downloader.util.Prefs(this) }
+
+    /** Re-read per pump so a change in Settings takes hold without a restart. */
+    private val maxConcurrent: Int get() = prefs.maxConcurrentDownloads
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val client = OkHttpClient.Builder()
         // Allow many concurrent segment requests across simultaneous downloads.
@@ -241,13 +247,16 @@ class DownloadService : Service() {
     /** Scratch space; finished files are published to shared storage. */
     private val workDir by lazy { File(cacheDir, "downloading").also { it.mkdirs() } }
 
-    // Concurrency: up to MAX_CONCURRENT downloads run at once; the rest wait.
+    // Concurrency: as many downloads as Settings allows run at once; the rest wait.
     private val lock = Any()
     private val pending = ArrayDeque<Task>()
     private var active = 0
 
     override fun onCreate() {
         super.onCreate()
+        // The service can be the first thing the system starts, so the speed
+        // cap and the destination folder are applied here as well as in the UI.
+        prefs.applyDownloadSettings()
         createNotificationChannel()
     }
 
@@ -323,7 +332,7 @@ class DownloadService : Service() {
         val toStart = mutableListOf<Task>()
         var idle: Boolean
         synchronized(lock) {
-            while (active < MAX_CONCURRENT && pending.isNotEmpty()) {
+            while (active < maxConcurrent && pending.isNotEmpty()) {
                 toStart.add(pending.removeFirst())
                 active++
             }

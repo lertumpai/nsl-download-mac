@@ -85,6 +85,74 @@ object BrowserScripts {
     """.trimIndent()
 
     /**
+     * Resumes anything the window transition managed to pause.
+     *
+     * Going into Picture-in-Picture briefly takes the window away, and Chromium
+     * pauses media the moment that happens — before [BACKGROUND_PLAYBACK]'s
+     * hooks get a say, because the pause comes from the browser rather than from
+     * the page. Only videos that were mid-playback are touched: `currentTime > 0`
+     * and not ended, so a deliberately paused clip stays paused.
+     */
+    val RESUME_MEDIA = """
+    (function () {
+      var media = document.querySelectorAll('video, audio');
+      var report = [];
+      for (var i = 0; i < media.length; i++) {
+        var m = media[i];
+        report.push('t=' + m.currentTime.toFixed(1) + ' paused=' + m.paused +
+                    ' blocked=' + (window.__nslPauseBlocked || 0));
+        if (m.paused && !m.ended && m.currentTime > 0) {
+          try {
+            var p = m.play();
+            if (p && p.catch) p.catch(function () {});
+          } catch (e) {}
+        }
+      }
+      return report.join(' | ');
+    })();
+    """.trimIndent()
+
+    /**
+     * Lets the app refuse page-initiated pauses for a while.
+     *
+     * Sites pause themselves on all sorts of window events, and in a floating
+     * window that reads as a bug: the user asked for the video to follow them.
+     * Only `pause()` calls made *by the page* are swallowed — a real pause from
+     * the browser's own media stack does not go through this API, so if the
+     * video still stops the cause is not the page.
+     */
+    val PAUSE_GUARD = """
+    (function () {
+      if (window.__nslPauseGuard) return;
+      window.__nslPauseGuard = true;
+      window.__nslPauseBlocked = 0;
+      var proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+      if (!proto || !proto.pause) return;
+      var realPause = proto.pause;
+      proto.pause = function () {
+        if (window.__nslBlockPause) {
+          window.__nslPauseBlocked++;
+          return;
+        }
+        return realPause.apply(this, arguments);
+      };
+    })();
+    """.trimIndent()
+
+    fun setPauseBlocked(blocked: Boolean) =
+        "(function(){ window.__nslBlockPause = $blocked; })();"
+
+    /**
+     * Stretches the playing video over the whole viewport.
+     *
+     * A Picture-in-Picture window shows whatever the activity shows, which for
+     * a browser is the *page* — a shrunken mess of site chrome, comments and a
+     * postage-stamp video. The page's own fullscreen API is not an option here:
+     * `requestFullscreen()` needs a user gesture and there is none to hand when
+     * the user is walking away from the app. Pinning the player with inline
+     * `!important` styles gets the same result and is undone by [PIP_FIT_OFF].
+     */
+    /**
      * Hides ad slots that survive network blocking (they are same-origin markup)
      * and skips YouTube's in-player ads, which are served from the same host as
      * the real video and therefore cannot be blocked by URL.
