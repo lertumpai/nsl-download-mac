@@ -207,10 +207,18 @@ class MainActivity : AppCompatActivity() {
             isBrowserVisible() &&
             browserFragment.hasPlayingMedia()
 
+    /**
+     * The floating window takes the shape of the video itself — a vertical clip
+     * floats vertically instead of being letterboxed into a 16:9 box. The
+     * browser clamps the ratio to what Android accepts before it gets here.
+     */
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.O)
     private fun buildPictureInPictureParams(): PictureInPictureParams =
         PictureInPictureParams.Builder()
-            .setAspectRatio(Rational(16, 9))
+            .setAspectRatio(
+                if (::browserFragment.isInitialized) browserFragment.pictureInPictureAspect()
+                else Rational(16, 9)
+            )
             .apply {
                 if (::browserFragment.isInitialized) {
                     browserFragment.pictureInPictureSourceRect()?.let { setSourceRectHint(it) }

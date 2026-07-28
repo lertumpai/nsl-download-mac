@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
+import android.util.Rational
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -57,6 +58,10 @@ class BrowserFragment : Fragment() {
         var isPlaying = false
         var mediaTitle = ""
 
+        /** Intrinsic size of the tab's video, reported by the page script. */
+        var videoWidth = 0
+        var videoHeight = 0
+
         @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
         val webView: BackgroundWebView = BackgroundWebView(requireContext()).also { wv ->
             wv.backgroundPlaybackEnabled = prefs.backgroundPlaybackEnabled
@@ -96,6 +101,8 @@ class BrowserFragment : Fragment() {
                     super.onPageStarted(view, url, favicon)
                     sniffer.clear()
                     setPlaying(false, "")
+                    videoWidth = 0
+                    videoHeight = 0
                     injectBackgroundScript(view)
                     if (this@Tab === currentTab) {
                         binding.urlBar.setText(url)
@@ -206,11 +213,31 @@ class BrowserFragment : Fragment() {
             (activity as? com.nsl.downloader.MainActivity)?.refreshPictureInPictureParams()
         }
 
+        /**
+         * The floating window's shape is fixed when Android creates it, so the
+         * page has to tell us the video's proportions *before* the handoff —
+         * hence the running report rather than a query at PiP time.
+         */
+        fun setVideoAspect(width: Int, height: Int) {
+            if (width <= 0 || height <= 0) return
+            if (videoWidth == width && videoHeight == height) return
+            videoWidth = width
+            videoHeight = height
+            if (this === currentTab) {
+                (activity as? com.nsl.downloader.MainActivity)?.refreshPictureInPictureParams()
+            }
+        }
+
         /** Bridge exposed to page JS as `NSLBridge`. */
         inner class MediaBridge {
             @android.webkit.JavascriptInterface
             fun onMediaState(playing: Boolean, title: String?) {
                 webView.post { setPlaying(playing, title.orEmpty()) }
+            }
+
+            @android.webkit.JavascriptInterface
+            fun onVideoAspect(width: Int, height: Int) {
+                webView.post { if (isAdded) setVideoAspect(width, height) }
             }
         }
     }
@@ -330,16 +357,44 @@ class BrowserFragment : Fragment() {
     }
 
     /**
-     * Screen-space rectangle occupied by [PIP_FIT_PREPARE]. Supplying it to
-     * Android prevents the system from scaling/cropping the whole portrait
-     * browser when it creates a 16:9 floating window.
+     * Shape of the floating window: the playing video's own proportions, so a
+     * vertical clip floats vertically instead of sitting letterboxed inside a
+     * 16:9 box. Falls back to 16:9 until the page has reported a size.
+     *
+     * Android rejects anything outside roughly 1:2.39…2.39:1, so the ratio is
+     * clamped rather than allowed to throw at `enterPictureInPictureMode()`.
+     */
+    fun pictureInPictureAspect(): Rational {
+        val tab = tabs.getOrNull(currentTabIndex) ?: return Rational(16, 9)
+        val w = tab.videoWidth
+        val h = tab.videoHeight
+        if (w <= 0 || h <= 0) return Rational(16, 9)
+        val ratio = w.toFloat() / h
+        return when {
+            ratio > MAX_PIP_RATIO -> Rational(239, 100)
+            ratio < MIN_PIP_RATIO -> Rational(100, 239)
+            else -> Rational(w, h)
+        }
+    }
+
+    /**
+     * Screen-space rectangle occupied by [BrowserScripts.PIP_FIT_PREPARE].
+     * Supplying it to Android prevents the system from scaling/cropping the
+     * whole portrait browser when it creates the floating window.
      */
     fun pictureInPictureSourceRect(): Rect? {
         if (_binding == null || tabs.isEmpty()) return null
         val rect = Rect()
         if (!currentWebView.getGlobalVisibleRect(rect) || rect.width() <= 0) return null
-        val videoHeight = (rect.width() * 9 / 16).coerceAtMost(rect.height())
-        rect.bottom = rect.top + videoHeight
+        val aspect = pictureInPictureAspect()
+        // Same top-left anchored fit the page script applies, so the hint and
+        // the pixels actually on screen describe the same rectangle.
+        val scale = minOf(
+            rect.width().toFloat() / aspect.numerator,
+            rect.height().toFloat() / aspect.denominator
+        )
+        rect.right = rect.left + (aspect.numerator * scale).toInt().coerceAtLeast(1)
+        rect.bottom = rect.top + (aspect.denominator * scale).toInt().coerceAtLeast(1)
         return rect
     }
 
@@ -1188,5 +1243,9 @@ class BrowserFragment : Fragment() {
 
         /** Grace period before the playback service is torn down. */
         const val PLAYBACK_STOP_DELAY_MS = 30_000L
+
+        /** Android refuses a PiP aspect ratio outside this range. */
+        const val MAX_PIP_RATIO = 2.39f
+        const val MIN_PIP_RATIO = 1f / 2.39f
     }
 }

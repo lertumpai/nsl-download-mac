@@ -22,18 +22,32 @@ object BrowserScripts {
       window.__nslMedia = true;
 
       var last = null;
+      var lastAspect = '';
       function report() {
         var playing = false;
         var media = document.querySelectorAll('video, audio');
+        var active = null;
         for (var i = 0; i < media.length; i++) {
           var m = media[i];
-          if (!m.paused && !m.ended && m.readyState > 2) { playing = true; break; }
+          if (!m.paused && !m.ended && m.readyState > 2) { playing = true; active = m; break; }
+        }
+        // The intrinsic size decides the shape of the floating window, so it is
+        // reported on every tick: a quality switch or a jump from a normal clip
+        // to a vertical Short changes it without any play/pause in between.
+        var video = active || document.querySelector('video');
+        var w = (video && video.videoWidth) || 0;
+        var h = (video && video.videoHeight) || 0;
+        var aspect = w + 'x' + h;
+        if (w > 0 && h > 0 && aspect !== lastAspect) {
+          lastAspect = aspect;
+          try { NSLBridge.onVideoAspect(w, h); } catch (e) {}
         }
         if (playing === last) return;
         last = playing;
         try { NSLBridge.onMediaState(playing, document.title || location.hostname); } catch (e) {}
       }
-      ['play', 'playing', 'pause', 'ended', 'emptied', 'abort'].forEach(function (type) {
+      ['play', 'playing', 'pause', 'ended', 'emptied', 'abort',
+       'loadedmetadata', 'resize'].forEach(function (type) {
         document.addEventListener(type, function () { setTimeout(report, 150); }, true);
       });
       setInterval(report, 2000);
@@ -193,8 +207,13 @@ object BrowserScripts {
      * but several phone WebView implementations return a blank frame. Moving
      * the element to `<body>` is also unsafe: YouTube and other players observe
      * that DOM removal and immediately stop playback.
+     *
+     * [fill] is `'aspect'` while the window is still full-screen (the video is
+     * pinned to a rectangle of its own aspect ratio at the top-left, which
+     * doubles as Android's source-rect hint) and `'window'` once the floating
+     * window exists and the video may occupy all of it.
      */
-    private fun pipFitScript(height: String) = """
+    private fun pipFitScript(fill: String) = """
     (function () {
       var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
       if (!videos.length) return 'no-video';
@@ -209,10 +228,24 @@ object BrowserScripts {
       var old = window.__nslPipVideo;
       if (old && old !== video) {
         old.classList.remove('__nsl-pip-video');
+        old.style.removeProperty('transform');
       }
       window.__nslPipVideo = video;
       window.__nslPipWasPlaying =
         window.__nslPipWasPlaying || (!video.paused && !video.ended);
+
+      // The pinned rectangle keeps the video's own proportions: portrait clips
+      // (Shorts, TikTok) get a portrait box instead of a 16:9 one with bars,
+      // and the activity hands Android the very same ratio as the window shape.
+      // It is anchored top-left and scaled to fit, exactly like the source-rect
+      // hint computed on the Kotlin side.
+      var vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+      var width = '100vw', height = '100vh';
+      if ('$fill' !== 'window') {
+        var scale = Math.min(window.innerWidth / vw, window.innerHeight / vh);
+        width = Math.round(vw * scale) + 'px';
+        height = Math.round(vh * scale) + 'px';
+      }
 
       var style = document.getElementById('__nsl_pip_fit');
       if (!style) {
@@ -224,17 +257,45 @@ object BrowserScripts {
         'html.__nsl-pip-root,body.__nsl-pip-root{' +
           'margin:0!important;padding:0!important;overflow:hidden!important;' +
           'background:#000!important;width:100%!important;height:100%!important}' +
+        // Anything that establishes a containing block for fixed descendants
+        // (transform, filter, perspective, will-change, contain…) would trap
+        // the video inside the player box instead of the window. YouTube uses
+        // several of these, which is what left the floating window showing the
+        // white page with the player squeezed into a corner.
         '.__nsl-pip-ancestor{' +
           'display:block!important;visibility:visible!important;opacity:1!important;' +
-          'transform:none!important;overflow:visible!important;clip:auto!important;' +
-          'clip-path:none!important;contain:none!important}' +
+          'transform:none!important;filter:none!important;' +
+          '-webkit-backdrop-filter:none!important;backdrop-filter:none!important;' +
+          'perspective:none!important;will-change:auto!important;' +
+          'contain:none!important;content-visibility:visible!important;' +
+          'zoom:1!important;mask:none!important;' +
+          // A stacking context on an ancestor would cap the video's z-index
+          // inside it and let the backdrop paint over the picture.
+          'z-index:auto!important;isolation:auto!important;' +
+          'mix-blend-mode:normal!important;' +
+          'overflow:visible!important;clip:auto!important;clip-path:none!important}' +
+        '#__nsl_pip_backdrop{' +
+          'position:fixed!important;left:0!important;top:0!important;' +
+          'width:100vw!important;height:100vh!important;margin:0!important;' +
+          'background:#000!important;pointer-events:none!important;' +
+          'z-index:2147483646!important}' +
         'video.__nsl-pip-video{' +
           'display:block!important;visibility:visible!important;opacity:1!important;' +
           'position:fixed!important;left:0!important;top:0!important;' +
-          'margin:0!important;padding:0!important;width:100vw!important;' +
-          'height:$height!important;max-width:none!important;max-height:none!important;' +
+          'margin:0!important;padding:0!important;width:' + width + '!important;' +
+          'height:' + height + '!important;max-width:none!important;max-height:none!important;' +
           'object-fit:contain!important;background:#000!important;' +
-          'transform:translateZ(0)!important;z-index:2147483647!important}';
+          'z-index:2147483647!important}';
+
+      // An opaque backdrop under the video, parented to <html> so it can never
+      // sit inside one of the page's own transformed subtrees. Without it any
+      // gap around the video shows the page itself — on YouTube, a white sheet.
+      var backdrop = document.getElementById('__nsl_pip_backdrop');
+      if (!backdrop) {
+        backdrop = document.createElement('div');
+        backdrop.id = '__nsl_pip_backdrop';
+        document.documentElement.appendChild(backdrop);
+      }
 
       document.documentElement.classList.add('__nsl-pip-root');
       if (document.body) document.body.classList.add('__nsl-pip-root');
@@ -247,32 +308,49 @@ object BrowserScripts {
         parent.classList.add('__nsl-pip-ancestor');
       }
       video.classList.add('__nsl-pip-video');
+      video.style.removeProperty('transform');
       try { video.setAttribute('playsinline', ''); } catch (e) {}
+
+      // Last line of defence: if some ancestor property we did not neutralise
+      // still anchors the fixed video away from the window origin, translate it
+      // back by the measured offset rather than leaving it stranded.
+      var rect = video.getBoundingClientRect();
+      if (Math.abs(rect.left) > 1 || Math.abs(rect.top) > 1) {
+        video.style.setProperty(
+          'transform',
+          'translate(' + (-rect.left) + 'px,' + (-rect.top) + 'px)',
+          'important');
+      }
+
       if (window.__nslPipWasPlaying && video.paused) {
         try {
           var play = video.play();
           if (play && play.catch) play.catch(function () {});
         } catch (e) {}
       }
-      return 'video-ready';
+      return 'video-ready ' + vw + 'x' + vh;
     })();
     """.trimIndent()
 
     /**
-     * Before the activity shrinks, make the video an exact 16:9 rectangle at
-     * the top of the WebView. Android receives the same rectangle as its
-     * source hint, avoiding a crop of the full portrait browser surface.
+     * Before the activity shrinks, pin the video to a rectangle of its own
+     * aspect ratio at the top of the WebView. Android receives the same
+     * rectangle as its source hint, avoiding a crop of the full portrait
+     * browser surface.
      */
-    val PIP_FIT_PREPARE = pipFitScript("56.25vw")
+    val PIP_FIT_PREPARE = pipFitScript("aspect")
 
     /** Once the PiP window exists, the video can occupy all of that window. */
-    val PIP_FIT_ON = pipFitScript("100vh")
+    val PIP_FIT_ON = pipFitScript("window")
 
     /** Restores normal page layout after PiP closes or entry fails. */
     val PIP_FIT_OFF = """
     (function () {
       var video = window.__nslPipVideo;
-      if (video) video.classList.remove('__nsl-pip-video');
+      if (video) {
+        video.classList.remove('__nsl-pip-video');
+        video.style.removeProperty('transform');
+      }
       document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
         node.classList.remove('__nsl-pip-ancestor');
       });
@@ -280,6 +358,8 @@ object BrowserScripts {
       if (document.body) document.body.classList.remove('__nsl-pip-root');
       var style = document.getElementById('__nsl_pip_fit');
       if (style) style.remove();
+      var backdrop = document.getElementById('__nsl_pip_backdrop');
+      if (backdrop) backdrop.remove();
       window.__nslPipVideo = null;
       window.__nslPipWasPlaying = false;
       return 'restored';
