@@ -64,6 +64,8 @@ const SIDEBAR_WIDTH = 330
 
 let mainWindow = null
 let sidebarCollapsed = false
+let pipFrame = null      // WebFrameMain that owns the floating PiP window
+let pipPollTimer = null
 const browserTabs = new Map() // tabId -> BrowserView
 let activeTabId = null
 let tabIdCounter = 0
@@ -435,7 +437,7 @@ function createWindow() {
     store.set('windowBounds', { width: w, height: h })
   })
 
-  mainWindow.on('closed', () => { mainWindow = null })
+  mainWindow.on('closed', () => { stopPiPWatch(false); pipFrame = null; mainWindow = null })
 }
 
 // Float above every other app; visibleOnFullScreen lets it sit over
@@ -535,6 +537,94 @@ const PLAYER_DETECT_SCRIPT = `(function(){
   return[...new Set(urls)];
 })()`
 
+// ---------------------------------------------------------------------------
+// Picture-in-Picture — float the page's video above every other app
+// ---------------------------------------------------------------------------
+// Chromium owns the floating window, so it survives the main window being
+// minimized and sits above other apps without any always-on-top handling here.
+const PIP_ENTER_SCRIPT = `(async () => {
+  var vids = Array.prototype.slice.call(document.querySelectorAll('video'))
+    .filter(function (v) {
+      return !v.disablePictureInPicture && v.readyState >= 1 && v.videoWidth > 0
+    })
+  if (!vids.length) return { ok: false, reason: 'no-video' }
+  // Prefer a video that is actually playing, then the largest one.
+  vids.sort(function (a, b) {
+    if (a.paused !== b.paused) return a.paused ? 1 : -1
+    return (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight)
+  })
+  try {
+    await vids[0].requestPictureInPicture()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, reason: e.name + ': ' + e.message }
+  }
+})()`
+
+// The video may live in an embedded player, so try every frame in the tab.
+async function enterPiPInSomeFrame(view) {
+  let frames
+  try { frames = view.webContents.mainFrame.framesInSubtree } catch { frames = [] }
+  if (!frames.length) frames = [view.webContents.mainFrame]
+
+  let lastReason = 'no-video'
+  for (const frame of frames) {
+    try {
+      const res = await frame.executeJavaScript(PIP_ENTER_SCRIPT, true)
+      if (res && res.ok) return { ok: true, frame }
+      if (res && res.reason && res.reason !== 'no-video') lastReason = res.reason
+    } catch {
+      // Frame went away mid-call, or script blocked — just try the next one.
+    }
+  }
+  return { ok: false, reason: lastReason }
+}
+
+// Electron never emits 'leave-picture-in-picture', so watch the frame instead.
+function startPiPWatch() {
+  stopPiPWatch(false)
+  pipPollTimer = setInterval(async () => {
+    let stillOpen = false
+    try {
+      stillOpen = await pipFrame.executeJavaScript('!!document.pictureInPictureElement')
+    } catch {
+      stillOpen = false // frame navigated away or was destroyed
+    }
+    if (!stillOpen) stopPiPWatch(true)
+  }, 1000)
+}
+
+function stopPiPWatch(restoreWindow) {
+  if (pipPollTimer) { clearInterval(pipPollTimer); pipPollTimer = null }
+  if (!restoreWindow) return
+  pipFrame = null
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.webContents.send('pip:state', false)
+  }
+}
+
+ipcMain.handle('pip:enter', async () => {
+  const view = getActiveView()
+  if (!view) return { ok: false, reason: 'no-tab' }
+
+  const res = await enterPiPInSomeFrame(view)
+  if (!res.ok) return res
+
+  pipFrame = res.frame
+  startPiPWatch()
+  mainWindow?.webContents.send('pip:state', true)
+  // "Collapse" the browser so the floating video is all that's left on screen.
+  mainWindow?.minimize()
+  return { ok: true }
+})
+
+ipcMain.handle('pip:exit', async () => {
+  try { await pipFrame?.executeJavaScript('document.exitPictureInPicture()', true) } catch {}
+  stopPiPWatch(true)
+  return { ok: true }
+})
+
 function handleVideoDownloadRequest(videoUrl, pageUrl, pageTitle) {
   if (!videoUrl || !pageUrl) return
   // Record the video URL as a detected stream on this page
@@ -566,10 +656,14 @@ function createBrowserTab(url) {
   // ⌘B while the page has focus — key events go to the BrowserView, not the
   // renderer, so the shortcut has to be caught here and forwarded.
   view.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && input.meta && !input.control && !input.alt &&
-        input.key.toLowerCase() === 'b') {
+    if (input.type !== 'keyDown' || !input.meta || input.control || input.alt) return
+    const key = input.key.toLowerCase()
+    if (key === 'b') {
       event.preventDefault()
       mainWindow?.webContents.send('ui:toggle-sidebar')
+    } else if (key === 'p' && input.shift) {
+      event.preventDefault()
+      mainWindow?.webContents.send('ui:toggle-pip')
     }
   })
 

@@ -66,6 +66,8 @@ function bindEvents() {
   applySidebarCollapsed(!!settings.sidebarCollapsed)
   $('btn-sidebar').addEventListener('click', () => toggleSidebar())
 
+  $('btn-pip').addEventListener('click', () => togglePiP())
+
   const btnPin = $('btn-pin')
   btnPin.classList.toggle('pinned', !!settings.alwaysOnTop)
   btnPin.addEventListener('click', async () => {
@@ -115,12 +117,13 @@ function bindEvents() {
     if (a === 'retry'  && dl) { startRetry(dl) }
   })
 
-  // ⌘B when the chrome itself has focus (the BrowserView case is forwarded from main)
+  // ⌘B / ⌘⇧P when the chrome itself has focus (the BrowserView case is
+  // forwarded from main, since key events there never reach this window)
   document.addEventListener('keydown', e => {
-    if (e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'b') {
-      e.preventDefault()
-      toggleSidebar()
-    }
+    if (!e.metaKey || e.ctrlKey || e.altKey) return
+    const k = e.key.toLowerCase()
+    if (k === 'b')                { e.preventDefault(); toggleSidebar() }
+    if (k === 'p' && e.shiftKey)  { e.preventDefault(); togglePiP() }
   })
 
   // Settings form
@@ -132,6 +135,9 @@ function bindEvents() {
 
 function bindIPCListeners() {
   window.api.on('ui:toggle-sidebar', () => toggleSidebar())
+  window.api.on('ui:toggle-pip', () => togglePiP())
+  // Main detects the user closing the floating window on its own.
+  window.api.on('pip:state', on => setPiPState(on))
 
   window.api.on('browser:navigate', ({ tabId, url, title }) => {
     const tab = browserTabsList.find(t => t.id === tabId)
@@ -941,6 +947,37 @@ async function loadLibraryFiles() {
   }
 }
 
+// ── Picture-in-Picture ────────────────────────────────────────────
+let pipActive = false
+
+async function togglePiP() {
+  if (pipActive) {
+    await window.api.exitPiP()
+    setPiPState(false)
+    return
+  }
+  const res = await window.api.enterPiP()
+  if (res && res.ok) {
+    setPiPState(true)
+    return
+  }
+  const why = res && res.reason
+  toast(
+    why === 'no-video' || why === 'no-tab'
+      ? 'No playing video found on this page.'
+      : 'Could not float this video: ' + (why || 'unknown error')
+  )
+}
+
+function setPiPState(on) {
+  pipActive = on
+  const btn = $('btn-pip')
+  btn.classList.toggle('pinned', on)
+  btn.title = on
+    ? 'Stop floating video (⌘⇧P)'
+    : 'Float video above other apps (⌘⇧P)'
+}
+
 // ── Sidebar collapse ──────────────────────────────────────────────
 function applySidebarCollapsed(collapsed) {
   document.body.classList.toggle('sidebar-collapsed', collapsed)
@@ -1223,6 +1260,15 @@ function bindPlayerEvents() {
 }
 
 // ── Utils ─────────────────────────────────────────────────────────
+let toastTimer = null
+function toast(msg) {
+  const el = $('toast')
+  el.textContent = msg
+  el.classList.add('show')
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3000)
+}
+
 const $ = id => document.getElementById(id)
 const esc = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
 const setVal = (id, val) => { const el = $(id); if (el) el.value = val }
