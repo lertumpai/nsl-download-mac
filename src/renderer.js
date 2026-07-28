@@ -63,6 +63,15 @@ function bindEvents() {
   btnRel.addEventListener('click',     () => window.api.reload())
   $('btn-settings').addEventListener('click', () => switchTab('settings'))
 
+  const btnPin = $('btn-pin')
+  btnPin.classList.toggle('pinned', !!settings.alwaysOnTop)
+  btnPin.addEventListener('click', async () => {
+    const on = await window.api.toggleAlwaysOnTop()
+    settings.alwaysOnTop = on
+    btnPin.classList.toggle('pinned', on)
+    btnPin.title = on ? 'Window stays on top — click to unpin' : 'Keep window on top'
+  })
+
   $('btn-clear-detected').addEventListener('click', () => {
     detectedPages.clear()
     $('detected-list').innerHTML = ''

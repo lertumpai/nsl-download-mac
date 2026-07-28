@@ -25,7 +25,8 @@ try {
       homepage: 'https://www.google.com',
       windowBounds: { width: 1300, height: 820 },
       defaultAudioFormat: 'mp3',
-      audioQuality: '320'
+      audioQuality: '320',
+      alwaysOnTop: false
     }
   })
 } catch {
@@ -41,7 +42,8 @@ try {
     homepage: 'https://www.google.com',
     windowBounds: { width: 1300, height: 820 },
     defaultAudioFormat: 'mp3',
-    audioQuality: '320'
+    audioQuality: '320',
+    alwaysOnTop: false
   }
   let data = { ...defaults }
   try { Object.assign(data, JSON.parse(fs.readFileSync(settingsPath, 'utf8'))) } catch {}
@@ -419,6 +421,8 @@ function createWindow() {
     }
   })
 
+  applyAlwaysOnTop(!!store.get('alwaysOnTop'))
+
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'))
 
   mainWindow.on('resize', () => {
@@ -428,6 +432,14 @@ function createWindow() {
   })
 
   mainWindow.on('closed', () => { mainWindow = null })
+}
+
+// Float above every other app; visibleOnFullScreen lets it sit over
+// full-screen apps on macOS instead of being left behind on another Space.
+function applyAlwaysOnTop(on) {
+  if (!mainWindow) return
+  mainWindow.setAlwaysOnTop(on, 'floating')
+  mainWindow.setVisibleOnAllWorkspaces(on, { visibleOnFullScreen: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,7 +1365,8 @@ ipcMain.handle('settings:get', () => store.store || {
   httpConnections: store.get('httpConnections'),
   homepage: store.get('homepage'),
   defaultAudioFormat: store.get('defaultAudioFormat'),
-  audioQuality: store.get('audioQuality')
+  audioQuality: store.get('audioQuality'),
+  alwaysOnTop: store.get('alwaysOnTop')
 })
 ipcMain.on('settings:set', (_, key, value) => {
   if (key === 'maxConcurrentDownloads') value = clampInt(value, 1, 10, 3)
@@ -1361,6 +1374,13 @@ ipcMain.on('settings:set', (_, key, value) => {
   if (key === 'httpConnections') value = clampInt(value, 1, 32, 16)
   store.set(key, value)
   if (key === 'maxConcurrentDownloads') drainDownloadQueue()
+})
+
+ipcMain.handle('window:toggleAlwaysOnTop', () => {
+  const on = !store.get('alwaysOnTop')
+  store.set('alwaysOnTop', on)
+  applyAlwaysOnTop(on)
+  return on
 })
 
 // ---------------------------------------------------------------------------

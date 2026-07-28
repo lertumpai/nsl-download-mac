@@ -33,6 +33,9 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: ()       => ipcRenderer.invoke('settings:get'),
   setSetting:  (k, v)   => ipcRenderer.send('settings:set', k, v),
 
+  // Window
+  toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
+
   // Video player
   showPlayer: () => ipcRenderer.send('player:show'),
   hidePlayer: () => ipcRenderer.send('player:hide'),
