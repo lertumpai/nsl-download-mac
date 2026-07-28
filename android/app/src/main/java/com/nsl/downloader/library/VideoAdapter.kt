@@ -10,13 +10,15 @@ import com.bumptech.glide.Glide
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.databinding.ItemVideoBinding
+import com.nsl.downloader.util.MediaStorage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class VideoAdapter(
     private val onClick: (VideoEntity) -> Unit,
-    private val onDelete: (VideoEntity) -> Unit
+    private val onDelete: (VideoEntity) -> Unit,
+    private val onLongClick: (VideoEntity) -> Unit
 ) : ListAdapter<VideoRow, VideoAdapter.VH>(DIFF) {
 
     companion object {
@@ -94,7 +96,9 @@ class VideoAdapter(
             }
 
             if (video.status == DownloadStatus.COMPLETED && video.localPath.isNotBlank()) {
-                Glide.with(thumbnail).load(video.localPath)
+                // Published items live in shared storage, so the path is a
+                // content:// URI on API 29+ and a plain path below that.
+                Glide.with(thumbnail).load(MediaStorage.toUri(video.localPath))
                     .placeholder(android.R.drawable.ic_media_play)
                     .into(thumbnail)
             } else {
@@ -103,6 +107,12 @@ class VideoAdapter(
 
             root.setOnClickListener {
                 if (video.status == DownloadStatus.COMPLETED) onClick(video)
+            }
+            root.setOnLongClickListener {
+                if (video.status == DownloadStatus.COMPLETED) {
+                    onLongClick(video)
+                    true
+                } else false
             }
             btnDelete.setOnClickListener { onDelete(video) }
         }

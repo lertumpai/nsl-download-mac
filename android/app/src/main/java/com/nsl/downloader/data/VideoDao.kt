@@ -31,4 +31,11 @@ interface VideoDao {
 
     @Query("SELECT * FROM videos WHERE status = :status")
     suspend fun getByStatus(status: DownloadStatus): List<VideoEntity>
+
+    /** Used when a folder is deleted: its videos fall back to the library root. */
+    @Query("UPDATE videos SET folderId = NULL WHERE folderId = :folderId")
+    suspend fun clearFolder(folderId: Long)
+
+    @Query("SELECT * FROM videos WHERE folderId = :folderId")
+    suspend fun getInFolder(folderId: Long): List<VideoEntity>
 }

@@ -3,16 +3,49 @@ package com.nsl.downloader.browser
 /**
  * JavaScript injected into every page the browser loads.
  *
- * [BACKGROUND_PLAYBACK] runs at document start (before the page's own scripts
- * bind their handlers); [AD_BLOCK_COSMETIC] runs once the DOM exists.
+ * [MEDIA_STATE] and [BACKGROUND_PLAYBACK] run at document start (before the
+ * page's own scripts bind their handlers); [AD_BLOCK_COSMETIC] runs once the
+ * DOM exists.
  */
 object BrowserScripts {
 
     /**
+     * Reports whether anything is playing via the `NSLBridge` binding.
+     *
+     * Injected regardless of playback mode: the foreground service needs it,
+     * and so does the Picture-in-Picture decision — the app only hands itself
+     * to the system when a video is actually running.
+     */
+    val MEDIA_STATE = """
+    (function () {
+      if (window.__nslMedia) return;
+      window.__nslMedia = true;
+
+      var last = null;
+      function report() {
+        var playing = false;
+        var media = document.querySelectorAll('video, audio');
+        for (var i = 0; i < media.length; i++) {
+          var m = media[i];
+          if (!m.paused && !m.ended && m.readyState > 2) { playing = true; break; }
+        }
+        if (playing === last) return;
+        last = playing;
+        try { NSLBridge.onMediaState(playing, document.title || location.hostname); } catch (e) {}
+      }
+      ['play', 'playing', 'pause', 'ended', 'emptied', 'abort'].forEach(function (type) {
+        document.addEventListener(type, function () { setTimeout(report, 150); }, true);
+      });
+      setInterval(report, 2000);
+    })();
+    """.trimIndent()
+
+    /**
      * Pins the Page Visibility API to "visible" and swallows the lifecycle
      * events sites use to auto-pause (YouTube pauses on `visibilitychange`).
-     * Also reports playback state back to the app via the `NSLBridge` binding
-     * so the foreground service can be started/stopped.
+     *
+     * Only needed for background *audio*: in Picture-in-Picture the window stays
+     * genuinely visible, so the page has no reason to pause itself.
      */
     val BACKGROUND_PLAYBACK = """
     (function () {
@@ -48,23 +81,6 @@ object BrowserScripts {
         window.onblur = null;
         window.onpagehide = null;
       }, 1000);
-
-      var last = null;
-      function report() {
-        var playing = false;
-        var media = document.querySelectorAll('video, audio');
-        for (var i = 0; i < media.length; i++) {
-          var m = media[i];
-          if (!m.paused && !m.ended && m.readyState > 2) { playing = true; break; }
-        }
-        if (playing === last) return;
-        last = playing;
-        try { NSLBridge.onMediaState(playing, document.title || location.hostname); } catch (e) {}
-      }
-      ['play', 'playing', 'pause', 'ended', 'emptied', 'abort'].forEach(function (type) {
-        addEL.call(document, type, function () { setTimeout(report, 150); }, true);
-      });
-      setInterval(report, 2000);
     })();
     """.trimIndent()
 

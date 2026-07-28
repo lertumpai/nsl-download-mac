@@ -14,7 +14,11 @@ data class VideoEntity(
     val fileSizeBytes: Long = 0,
     val downloadedAt: Long = System.currentTimeMillis(),
     val status: DownloadStatus = DownloadStatus.PENDING,
-    val lastPositionMs: Long = 0
+    val lastPositionMs: Long = 0,
+    /** Library folder this entry lives in; null = the library root. */
+    val folderId: Long? = null,
+    /** MIME type of the produced file, e.g. video/mp4 or audio/mpeg. */
+    val mimeType: String = "video/mp4"
 )
 
 enum class DownloadStatus { PENDING, DOWNLOADING, COMPLETED, FAILED }

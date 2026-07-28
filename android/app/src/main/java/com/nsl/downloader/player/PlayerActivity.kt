@@ -1,8 +1,13 @@
 package com.nsl.downloader.player
 
 import android.annotation.SuppressLint
+import android.app.PictureInPictureParams
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.os.Bundle
+import android.util.Rational
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -17,6 +22,8 @@ import androidx.media3.ui.TimeBar
 import com.nsl.downloader.R
 import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.databinding.ActivityPlayerBinding
+import com.nsl.downloader.util.MediaStorage
+import com.nsl.downloader.util.Prefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -40,6 +47,7 @@ class PlayerActivity : AppCompatActivity() {
     private var videoId: Long = -1L
     private var videoPath: String? = null
     private var thumbnailJob: Job? = null
+    private val prefs by lazy { Prefs(this) }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,7 +74,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun setupPlayer(path: String) {
         player = ExoPlayer.Builder(this).build().also { exo ->
             binding.playerView.player = exo
-            val item = MediaItem.fromUri(android.net.Uri.parse(path))
+            val item = MediaItem.fromUri(MediaStorage.toUri(path))
             exo.setMediaItem(item)
             exo.prepare()
             exo.playWhenReady = true
@@ -109,10 +117,11 @@ class PlayerActivity : AppCompatActivity() {
     private fun showThumbnail(positionMs: Long, card: View, image: android.widget.ImageView) {
         thumbnailJob?.cancel()
         thumbnailJob = lifecycleScope.launch {
+            val path = videoPath ?: return@launch
             val bmp = withContext(Dispatchers.IO) {
                 runCatching {
                     val retriever = MediaMetadataRetriever()
-                    retriever.setDataSource(videoPath)
+                    MediaStorage.applyDataSource(retriever, this@PlayerActivity, path)
                     val b = retriever.getFrameAtTime(positionMs * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     retriever.release()
                     b
@@ -193,10 +202,67 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    // ------------------------------------------------- picture-in-picture
+
+    /**
+     * Fires when the user swipes to another app or goes home. With PiP chosen
+     * as the playback mode the video follows them into a floating window; the
+     * mutually exclusive background-audio mode deliberately does nothing here.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!prefs.pictureInPictureEnabled) return
+        if (isInPictureInPictureMode) return
+        if (player?.isPlaying != true) return
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
+
+        runCatching {
+            enterPictureInPictureMode(
+                PictureInPictureParams.Builder()
+                    .setAspectRatio(currentAspectRatio())
+                    .build()
+            )
+        }
+    }
+
+    /** PiP rejects extreme ratios, so the video's own ratio is clamped. */
+    private fun currentAspectRatio(): Rational {
+        val size = player?.videoSize
+        val width = size?.width ?: 0
+        val height = size?.height ?: 0
+        if (width <= 0 || height <= 0) return Rational(16, 9)
+        val ratio = width.toFloat() / height
+        return when {
+            ratio > 2.39f -> Rational(239, 100)
+            ratio < 0.42f -> Rational(42, 100)
+            else -> Rational(width, height)
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // The PiP window is far too small for the transport controls.
+        binding.playerView.useController = !isInPictureInPictureMode
+        if (isInPictureInPictureMode) binding.playerView.hideController()
+    }
+
     override fun onPause() {
         super.onPause()
         val pos = player?.currentPosition ?: 0L
         savePosition(pos)
+        // In PiP the activity is paused but the window is still on screen, so
+        // pausing here would defeat the whole point of the mode.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode) return
+        player?.pause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Leaving PiP by dismissing the window stops the activity; release then.
         player?.pause()
     }
 

@@ -107,4 +107,16 @@ dependencies {
 
     // Gson
     implementation 'com.google.code.gson:gson:2.10.1'
+
+    // YouTube stream/playlist extraction (signature + n-param descrambling via Rhino).
+    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.4'
+
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test:rules:1.5.0'
+
+    // Pure-Java LAME port used to transcode extracted audio to real MP3.
+    // de.sciss's repackaging has no javax.sound.* references, so it dexes cleanly
+    // as long as we stay off `lowlevel.LameEncoder` (see util/Mp3Encoder.kt).
+    implementation 'de.sciss:jump3r:1.0.5'
 }

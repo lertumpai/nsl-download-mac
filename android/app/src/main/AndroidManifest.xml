@@ -21,9 +21,17 @@
         android:theme="@style/Theme.NSLDownloader"
         android:usesCleartextTraffic="true">
 
+        <!--
+          supportsPictureInPicture + the resize/layout configChanges let the
+          browser follow the user into a floating window without being recreated
+          (see Prefs.PlaybackMode.PICTURE_IN_PICTURE).
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -35,6 +43,8 @@
             android:name=".player.PlayerActivity"
             android:exported="false"
             android:screenOrientation="fullUser"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
             android:theme="@style/Theme.NSLDownloader.NoActionBar" />
 

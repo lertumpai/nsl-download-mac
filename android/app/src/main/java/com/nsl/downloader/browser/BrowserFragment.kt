@@ -1,6 +1,10 @@
 package com.nsl.downloader.browser
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
@@ -21,10 +25,12 @@ import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.service.HlsDownloader
 import com.nsl.downloader.service.PlaybackBus
 import com.nsl.downloader.service.PlaybackService
+import com.nsl.downloader.util.PlaybackMode
 import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.util.guessTitleFromUrl
 import com.nsl.downloader.util.VideoType
+import com.nsl.downloader.youtube.YouTubeResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -111,6 +117,25 @@ class BrowserFragment : Fragment() {
                     }
                 }
 
+                /**
+                 * Pages (YouTube included) request fullscreen by handing us a
+                 * view to display; the activity hosts it above the whole UI so
+                 * it also covers the tab bar and the system bars.
+                 */
+                override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
+                    if (view == null || callback == null) return
+                    val activity = activity as? com.nsl.downloader.MainActivity
+                    if (activity == null) {
+                        callback.onCustomViewHidden()
+                        return
+                    }
+                    activity.enterFullscreen(view, callback)
+                }
+
+                override fun onHideCustomView() {
+                    (activity as? com.nsl.downloader.MainActivity)?.exitFullscreen()
+                }
+
                 override fun onCreateWindow(
                     view: WebView?, isDialog: Boolean,
                     isUserGesture: Boolean, resultMsg: Message?
@@ -132,14 +157,7 @@ class BrowserFragment : Fragment() {
             }
             wv.setOnLongClickListener {
                 val hit = wv.hitTestResult
-                val url = hit.extra
-                if (hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE && !url.isNullOrEmpty()) {
-                    addNewTab(url)
-                    Toast.makeText(requireContext(), "Opened in new tab", Toast.LENGTH_SHORT).show()
-                    true
-                } else {
-                    false
-                }
+                showLinkMenu(hit)
             }
             sniffer.onNewVideo = {
                 if (this === currentTab) {
@@ -148,7 +166,13 @@ class BrowserFragment : Fragment() {
             }
         }
 
+        /**
+         * The media reporter always goes in — both the playback service and the
+         * PiP trigger depend on it. The visibility-pinning half is specific to
+         * background audio.
+         */
         fun injectBackgroundScript(view: WebView?) {
+            view?.evaluateJavascript(BrowserScripts.MEDIA_STATE, null)
             if (!prefs.backgroundPlaybackEnabled) return
             view?.evaluateJavascript(BrowserScripts.BACKGROUND_PLAYBACK, null)
         }
@@ -195,6 +219,30 @@ class BrowserFragment : Fragment() {
         setupControls()
         PlaybackBus.stopRequested = { if (isAdded) pauseAllMedia(notifyService = false) }
         addNewTab("https://www.google.com")
+        onFooterCollapsedChanged(
+            (activity as? com.nsl.downloader.MainActivity)?.isFooterCollapsed() ?: false
+        )
+    }
+
+    /** True while any tab has playing media — drives the PiP decision. */
+    fun hasPlayingMedia(): Boolean = tabs.any { it.isPlaying }
+
+    /**
+     * In a PiP window only the page itself is shown. FragmentActivity dispatches
+     * this for us when the activity's own callback runs.
+     */
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode)
+        if (_binding == null) return
+        binding.topBar.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
+        binding.progressBar.visibility = View.GONE
+        if (isInPictureInPictureMode) binding.fabDownload.hide() else updateFab()
+    }
+
+    /** Collapsing the footer shrinks the download button to its icon. */
+    fun onFooterCollapsedChanged(collapsed: Boolean) {
+        if (_binding == null) return
+        if (collapsed) binding.fabDownload.shrink() else binding.fabDownload.extend()
     }
 
     /**
@@ -309,21 +357,85 @@ class BrowserFragment : Fragment() {
         binding.btnReload.setOnClickListener { currentWebView.reload() }
         binding.btnNewTab.setOnClickListener { addNewTab() }
         binding.btnTabCount.setOnClickListener { showTabSwitcher() }
-        binding.fabDownload.setOnClickListener { showVideoPicker() }
+        binding.fabDownload.setOnClickListener { onDownloadTapped() }
     }
 
-    /** Overflow menu: ad block + background playback toggles. */
+    // ------------------------------------------------------ long-press menu
+
+    /**
+     * Long-pressing a link opens a chooser rather than silently opening a tab,
+     * so "open in new tab" is a deliberate choice alongside copy/share/download.
+     */
+    private fun showLinkMenu(hit: WebView.HitTestResult): Boolean {
+        val url = hit.extra
+        val isLink = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+            hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+        val isImage = hit.type == WebView.HitTestResult.IMAGE_TYPE
+        if (url.isNullOrEmpty() || (!isLink && !isImage)) return false
+
+        val actions = buildList<Pair<String, () -> Unit>> {
+            if (isLink) {
+                add(getString(R.string.link_open_new_tab) to { addNewTabFromMenu(url) })
+                add(getString(R.string.link_open_here) to { currentWebView.loadUrl(url) })
+            }
+            add(getString(R.string.link_copy) to { copyToClipboard(url) })
+            add(getString(R.string.link_share) to { shareUrl(url) })
+            add(getString(R.string.link_download) to { downloadLink(url) })
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(url.take(80))
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        return true
+    }
+
+    private fun addNewTabFromMenu(url: String) {
+        addNewTab(url)
+        Toast.makeText(requireContext(), R.string.opened_in_new_tab, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun copyToClipboard(url: String) {
+        val clipboard = requireContext().getSystemService(Context.CLIPBOARD_SERVICE)
+            as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("url", url))
+        Toast.makeText(requireContext(), R.string.link_copied, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareUrl(url: String) {
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, url)
+                },
+                getString(R.string.link_share)
+            )
+        )
+    }
+
+    /** Sends a long-pressed link straight to the downloader. */
+    private fun downloadLink(url: String) {
+        if (YouTubeResolver.isYouTubeUrl(url)) {
+            showYouTubeDialog(url, guessTitleFromUrl(url))
+            return
+        }
+        startDownload(url, guessTitleFromUrl(url), buildHeaders(url, emptyMap()))
+    }
+
+    /** Overflow menu: ad block + playback mode + new tab. */
     private fun showMenu(anchor: View) {
         val popup = PopupMenu(requireContext(), anchor)
         popup.menu.add(0, MENU_AD_BLOCK, 0, getString(R.string.menu_ad_block)).apply {
             isCheckable = true
             isChecked = prefs.adBlockEnabled
         }
-        popup.menu.add(0, MENU_BACKGROUND, 1, getString(R.string.menu_background_playback)).apply {
-            isCheckable = true
-            isChecked = prefs.backgroundPlaybackEnabled
-        }
+        popup.menu.add(0, MENU_PLAYBACK_MODE, 1, getString(R.string.menu_playback_mode))
         popup.menu.add(0, MENU_NEW_TAB, 2, getString(R.string.tab_new))
+        popup.menu.add(0, MENU_TOGGLE_FOOTER, 3, getString(R.string.menu_toggle_footer))
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
                 MENU_AD_BLOCK -> {
@@ -331,18 +443,63 @@ class BrowserFragment : Fragment() {
                     toast(if (prefs.adBlockEnabled) R.string.ad_block_on else R.string.ad_block_off)
                     currentWebView.reload()
                 }
-                MENU_BACKGROUND -> {
-                    val enabled = !prefs.backgroundPlaybackEnabled
-                    prefs.backgroundPlaybackEnabled = enabled
-                    tabs.forEach { it.webView.backgroundPlaybackEnabled = enabled }
-                    if (!enabled) pauseAllMedia(notifyService = true) else syncPlaybackService()
-                    toast(if (enabled) R.string.background_on else R.string.background_off)
-                }
+                MENU_PLAYBACK_MODE -> showPlaybackModeDialog()
                 MENU_NEW_TAB -> addNewTab()
+                MENU_TOGGLE_FOOTER -> (activity as? com.nsl.downloader.MainActivity)?.let {
+                    it.setFooterCollapsed(!it.isFooterCollapsed())
+                }
             }
             true
         }
         popup.show()
+    }
+
+    /**
+     * Background audio and Picture-in-Picture are one exclusive choice: they
+     * both claim the same media pipeline when the app leaves the foreground.
+     */
+    private fun showPlaybackModeDialog() {
+        val modes = listOf(
+            PlaybackMode.OFF to getString(R.string.playback_mode_off),
+            PlaybackMode.BACKGROUND to getString(R.string.playback_mode_background),
+            PlaybackMode.PICTURE_IN_PICTURE to getString(R.string.playback_mode_pip)
+        )
+        val current = modes.indexOfFirst { it.first == prefs.playbackMode }.coerceAtLeast(0)
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.menu_playback_mode)
+            .setSingleChoiceItems(modes.map { it.second }.toTypedArray(), current) { dialog, which ->
+                applyPlaybackMode(modes[which].first)
+                dialog.dismiss()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun applyPlaybackMode(mode: PlaybackMode) {
+        prefs.playbackMode = mode
+        val backgroundOn = mode == PlaybackMode.BACKGROUND
+        tabs.forEach { it.webView.backgroundPlaybackEnabled = backgroundOn }
+        if (backgroundOn) syncPlaybackService() else pauseServiceForModeChange()
+        toast(
+            when (mode) {
+                PlaybackMode.OFF -> R.string.playback_mode_off_toast
+                PlaybackMode.BACKGROUND -> R.string.playback_mode_background_toast
+                PlaybackMode.PICTURE_IN_PICTURE -> R.string.playback_mode_pip_toast
+            }
+        )
+    }
+
+    /**
+     * Leaving background mode retires the foreground service but must not stop
+     * playback — in PiP mode the video keeps running in its own window.
+     */
+    private fun pauseServiceForModeChange() {
+        uiHandler.removeCallbacks(stopPlaybackRunnable)
+        if (playbackServiceRunning) {
+            playbackServiceRunning = false
+            context?.let { PlaybackService.stop(it) }
+        }
     }
 
     private fun toast(resId: Int) =
@@ -357,15 +514,213 @@ class BrowserFragment : Fragment() {
         currentWebView.loadUrl(url)
     }
 
+    /**
+     * The button stays available on YouTube even with nothing sniffed: its
+     * media never passes through [VideoSniffer] as a downloadable URL.
+     */
     private fun updateFab() {
         val count = currentTab.sniffer.count()
-        if (count > 0) {
+        val youTube = isYouTubePage()
+        if (count > 0 || youTube) {
             binding.fabDownload.show()
-            binding.fabDownload.text = "Download ($count)"
+            binding.fabDownload.text =
+                if (youTube) getString(R.string.download) else "Download ($count)"
+            onFooterCollapsedChanged(
+                (activity as? com.nsl.downloader.MainActivity)?.isFooterCollapsed() ?: false
+            )
         } else {
             binding.fabDownload.hide()
         }
     }
+
+    private fun isYouTubePage(): Boolean {
+        val url = currentWebView.url ?: return false
+        return YouTubeResolver.isYouTubeUrl(url) &&
+            (YouTubeResolver.classify(url) != YouTubeResolver.Kind.OTHER ||
+                YouTubeResolver.playlistIdOf(url) != null)
+    }
+
+    private fun onDownloadTapped() {
+        val url = currentWebView.url
+        if (url != null && isYouTubePage()) {
+            showYouTubeDialog(url, youTubePageTitle(url))
+        } else {
+            showVideoPicker()
+        }
+    }
+
+    /** The document title carries a " - YouTube" suffix nobody wants in a filename. */
+    private fun youTubePageTitle(url: String): String =
+        (currentWebView.title ?: guessTitleFromUrl(url))
+            .removeSuffix(" - YouTube")
+            .trim()
+            .ifBlank { guessTitleFromUrl(url) }
+
+    // ----------------------------------------------------------- YouTube UI
+
+    /** Format / playlist chooser for a YouTube page. */
+    private fun showYouTubeDialog(pageUrl: String, pageTitle: String) {
+        val playlistId = YouTubeResolver.playlistIdOf(pageUrl)
+        val isPlaylistPage = YouTubeResolver.classify(pageUrl) == YouTubeResolver.Kind.PLAYLIST
+        val isStream = YouTubeResolver.classify(pageUrl) == YouTubeResolver.Kind.STREAM
+
+        val actions = buildList<Pair<String, () -> Unit>> {
+            if (isStream) {
+                add(getString(R.string.yt_video_mp4) to { chooseMp4Quality(pageUrl, pageTitle) })
+                add(getString(R.string.yt_audio_mp3) to { chooseMp3Bitrate(pageUrl, pageTitle) })
+            }
+            if (isPlaylistPage || playlistId != null) {
+                val listUrl = if (isPlaylistPage) pageUrl
+                else YouTubeResolver.playlistUrlFor(playlistId!!)
+                add(getString(R.string.yt_playlist_mp4) to {
+                    downloadPlaylist(listUrl, DownloadService.YtFormat.MP4)
+                })
+                add(getString(R.string.yt_playlist_mp3) to {
+                    downloadPlaylist(listUrl, DownloadService.YtFormat.MP3)
+                })
+            }
+        }
+
+        if (actions.isEmpty()) {
+            showVideoPicker()
+            return
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_download_title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun chooseMp4Quality(pageUrl: String, pageTitle: String) {
+        Toast.makeText(requireContext(), R.string.yt_reading_qualities, Toast.LENGTH_SHORT).show()
+        val userAgent = currentWebView.settings.userAgentString
+        viewLifecycleOwner.lifecycleScope.launch {
+            val resolved = withContext(Dispatchers.IO) {
+                YouTubeResolver.ensureInitialised(userAgent)
+                runCatching { YouTubeResolver.resolveVideo(pageUrl) }.getOrNull()
+            }
+            if (!isAdded) return@launch
+            val options = resolved?.videoOptions.orEmpty()
+            if (options.isEmpty()) {
+                toast(R.string.yt_no_streams)
+                return@launch
+            }
+            val title = resolved!!.title.ifBlank { pageTitle }
+            // Renditions above 360p arrive without audio and are remuxed after
+            // download; the label says so rather than surprising the user.
+            val labels = options.map { option ->
+                if (option.needsMux) "${option.label}  ·  ${getString(R.string.yt_merged)}"
+                else option.label
+            }.toTypedArray()
+
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.yt_select_quality)
+                .setItems(labels) { _, which ->
+                    startYouTubeDownload(
+                        pageUrl, title, DownloadService.YtFormat.MP4, options[which].height
+                    )
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun chooseMp3Bitrate(pageUrl: String, pageTitle: String) {
+        val rates = intArrayOf(128, 192, 320)
+        val selected = rates.indexOf(prefs.mp3Bitrate).coerceAtLeast(0)
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_select_bitrate)
+            .setSingleChoiceItems(
+                rates.map { getString(R.string.yt_bitrate_item, it) }.toTypedArray(), selected
+            ) { dialog, which ->
+                prefs.mp3Bitrate = rates[which]
+                dialog.dismiss()
+                startYouTubeDownload(pageUrl, pageTitle, DownloadService.YtFormat.MP3, 0)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Reads the playlist listing, then queues one job per entry. Each job only
+     * carries the watch URL — stream URLs are resolved by the service as it
+     * reaches the item, since they expire long before a long queue drains.
+     */
+    private fun downloadPlaylist(playlistUrl: String, format: DownloadService.YtFormat) {
+        val userAgent = currentWebView.settings.userAgentString
+        val bitrate = prefs.mp3Bitrate
+        val progress = MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_reading_playlist)
+            .setView(android.widget.ProgressBar(requireContext()).apply {
+                setPadding(48, 48, 48, 48)
+            })
+            .setCancelable(false)
+            .show()
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val playlist = withContext(Dispatchers.IO) {
+                YouTubeResolver.ensureInitialised(userAgent)
+                runCatching { YouTubeResolver.resolvePlaylist(playlistUrl) }.getOrNull()
+            }
+            progress.dismiss()
+            if (!isAdded) return@launch
+            val items = playlist?.items.orEmpty()
+            if (items.isEmpty()) {
+                toast(R.string.yt_playlist_empty)
+                return@launch
+            }
+
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(playlist!!.title)
+                .setMessage(getString(R.string.yt_playlist_confirm, items.size))
+                .setPositiveButton(R.string.download) { _, _ ->
+                    items.forEach { item ->
+                        DownloadService.startYouTube(
+                            context = requireContext(),
+                            pageUrl = item.url,
+                            title = item.title,
+                            format = format,
+                            targetHeight = 0,
+                            mp3Bitrate = bitrate,
+                            userAgent = userAgent
+                        )
+                    }
+                    Toast.makeText(
+                        requireContext(),
+                        getString(R.string.yt_playlist_queued, items.size),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun startYouTubeDownload(
+        pageUrl: String,
+        title: String,
+        format: DownloadService.YtFormat,
+        height: Int
+    ) {
+        DownloadService.startYouTube(
+            context = requireContext(),
+            pageUrl = pageUrl,
+            title = title,
+            format = format,
+            targetHeight = height,
+            mp3Bitrate = prefs.mp3Bitrate,
+            userAgent = currentWebView.settings.userAgentString
+        )
+        Toast.makeText(requireContext(), R.string.download_started, Toast.LENGTH_SHORT).show()
+        (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
+    }
+
+    // ------------------------------------------------------ sniffed videos
 
     private fun showVideoPicker() {
         val videos = currentTab.sniffer.snapshot()
@@ -440,7 +795,7 @@ class BrowserFragment : Fragment() {
 
     private fun startDownload(url: String, title: String, headers: HashMap<String, String>) {
         DownloadService.start(requireContext(), url, title, headers)
-        Toast.makeText(requireContext(), "Download started", Toast.LENGTH_SHORT).show()
+        Toast.makeText(requireContext(), R.string.download_started, Toast.LENGTH_SHORT).show()
         (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
     }
 
@@ -488,8 +843,9 @@ class BrowserFragment : Fragment() {
 
     private companion object {
         const val MENU_AD_BLOCK = 1
-        const val MENU_BACKGROUND = 2
+        const val MENU_PLAYBACK_MODE = 2
         const val MENU_NEW_TAB = 3
+        const val MENU_TOGGLE_FOOTER = 4
 
         /** Grace period before the playback service is torn down. */
         const val PLAYBACK_STOP_DELAY_MS = 30_000L
