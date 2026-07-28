@@ -7,6 +7,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
+import com.nsl.downloader.R
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.databinding.ItemVideoBinding
@@ -114,6 +115,12 @@ class VideoAdapter(
                     true
                 } else false
             }
+            // Same button, different meaning: mid-transfer it cancels.
+            btnDelete.contentDescription = root.context.getString(
+                if (video.status == DownloadStatus.DOWNLOADING ||
+                    video.status == DownloadStatus.PENDING
+                ) R.string.cancel_download else R.string.remove
+            )
             btnDelete.setOnClickListener { onDelete(video) }
         }
     }

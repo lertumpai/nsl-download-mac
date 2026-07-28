@@ -5,8 +5,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.data.DownloadProgressBus
+import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.FolderEntity
 import com.nsl.downloader.data.VideoEntity
+import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.util.MediaStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -110,6 +112,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Remove a single video and ALL its files (video + thumbnail). */
     fun removeVideo(video: VideoEntity) {
+        stopIfDownloading(video)
         viewModelScope.launch(Dispatchers.IO) {
             deleteFiles(video)
             dao.deleteById(video.id)
@@ -123,6 +126,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val all = dao.observeAllOnce()
                 .filter { folderId == null || it.folderId == folderId }
             all.forEach {
+                stopIfDownloading(it)
                 deleteFiles(it)
                 dao.deleteById(it.id)
             }
@@ -133,6 +137,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 folderName(folderId)?.let { MediaStorage.removeFolderIfEmpty(it) }
             }
+        }
+    }
+
+    /**
+     * Dropping the row is not enough for an in-flight download: the service
+     * would keep transferring, keep its notification up and still publish the
+     * finished file into a library that no longer expects it.
+     */
+    private fun stopIfDownloading(video: VideoEntity) {
+        if (video.status == DownloadStatus.DOWNLOADING || video.status == DownloadStatus.PENDING) {
+            DownloadService.cancel(video.id)
         }
     }
 

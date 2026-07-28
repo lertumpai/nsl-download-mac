@@ -5,8 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.nsl.downloader.MainActivity
+import com.nsl.downloader.R
 import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.data.DownloadProgressBus
 import com.nsl.downloader.data.DownloadStatus
@@ -19,15 +21,16 @@ import kotlinx.coroutines.*
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.File
-import java.io.FileOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class DownloadService : Service() {
 
     companion object {
         const val ACTION_DOWNLOAD = "com.nsl.downloader.DOWNLOAD"
+        const val ACTION_CANCEL = "com.nsl.downloader.CANCEL"
+        const val EXTRA_VIDEO_ID = "video_id"
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
         const val EXTRA_HEADERS = "headers"
@@ -44,6 +47,30 @@ class DownloadService : Service() {
         const val PROGRESS_NOTIF_BASE = 20000 // per-download progress
         const val DONE_NOTIF_BASE = 30000     // per-download complete/failed
         const val MAX_CONCURRENT = 3          // simultaneous downloads
+
+        /** Progress is posted at most this often; see the note in [runJob]. */
+        private const val PROGRESS_INTERVAL_MS = 300L
+
+        /**
+         * In-flight transfers keyed by the library row they are filling. The
+         * service owns the coroutines, but cancelling has to work from the
+         * Library too, so the registry lives here rather than on the instance.
+         */
+        private val running = ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
+
+        /** Ids cancelled before their coroutine had a chance to register. */
+        private val cancelledIds: MutableSet<Long> =
+            java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
+
+        /**
+         * Stops the download filling library row [videoId] and discards its
+         * partial file. A no-op for rows that already finished, so callers do
+         * not have to check first.
+         */
+        fun cancel(videoId: Long) {
+            cancelledIds.add(videoId)
+            running.remove(videoId)?.cancel(CancellationException("cancelled by user"))
+        }
 
         /** A plain URL download: HLS, DASH or a direct progressive file. */
         fun start(
@@ -110,7 +137,8 @@ class DownloadService : Service() {
     enum class Kind { GENERIC, YOUTUBE }
     enum class YtFormat { MP4, MP3 }
 
-    private data class Job(
+    /** A queued unit of work. (Named to stay clear of [kotlinx.coroutines.Job].) */
+    private data class Task(
         val kind: Kind,
         val url: String,
         val title: String,
@@ -132,15 +160,20 @@ class DownloadService : Service() {
         })
         .connectionPool(ConnectionPool(32, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
+        // Generous per-read window: a genuinely stalled range is retried from
+        // where it stopped, but a slow mobile link should not trip this.
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
     private val hlsDownloader by lazy { HlsDownloader(client) }
+    private val rangedDownloader by lazy { RangedDownloader(client) }
 
     /** Scratch space; finished files are published to shared storage. */
     private val workDir by lazy { File(cacheDir, "downloading").also { it.mkdirs() } }
 
     // Concurrency: up to MAX_CONCURRENT downloads run at once; the rest wait.
     private val lock = Any()
-    private val pending = ArrayDeque<Job>()
+    private val pending = ArrayDeque<Task>()
     private var active = 0
 
     override fun onCreate() {
@@ -149,13 +182,20 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL) {
+            intent.getLongExtra(EXTRA_VIDEO_ID, -1L).takeIf { it >= 0 }?.let { cancel(it) }
+            // Normally the cancelled job's own teardown stops us via pump();
+            // this covers an id that was already gone when the action arrived.
+            stopIfIdle()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_DOWNLOAD) {
             val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
             @Suppress("UNCHECKED_CAST")
             val headers = (intent.getSerializableExtra(EXTRA_HEADERS) as? HashMap<String, String>)
                 ?: HashMap()
             val folderId = intent.getLongExtra(EXTRA_FOLDER_ID, -1L).takeIf { it >= 0 }
-            val job = Job(
+            val task = Task(
                 kind = runCatching { Kind.valueOf(intent.getStringExtra(EXTRA_KIND).orEmpty()) }
                     .getOrDefault(Kind.GENERIC),
                 url = url,
@@ -170,7 +210,7 @@ class DownloadService : Service() {
                 mp3Bitrate = intent.getIntExtra(EXTRA_MP3_BITRATE, 192),
                 userAgent = intent.getStringExtra(EXTRA_USER_AGENT).orEmpty()
             )
-            synchronized(lock) { pending.addLast(job) }
+            synchronized(lock) { pending.addLast(task) }
             // Must enter foreground promptly after startForegroundService().
             startForeground(NOTIF_ID, summaryNotification())
             pump()
@@ -180,7 +220,7 @@ class DownloadService : Service() {
 
     /** Launch as many queued downloads as the concurrency limit allows. */
     private fun pump() {
-        val toStart = mutableListOf<Job>()
+        val toStart = mutableListOf<Task>()
         var idle: Boolean
         synchronized(lock) {
             while (active < MAX_CONCURRENT && pending.isNotEmpty()) {
@@ -190,10 +230,10 @@ class DownloadService : Service() {
             idle = active == 0 && pending.isEmpty()
         }
 
-        toStart.forEach { job ->
+        toStart.forEach { task ->
             scope.launch {
                 try {
-                    runJob(job)
+                    runJob(task)
                 } finally {
                     synchronized(lock) { active-- }
                     pump()
@@ -209,75 +249,119 @@ class DownloadService : Service() {
         }
     }
 
+    /** Tears the service down once nothing is left to transfer. */
+    private fun stopIfIdle() {
+        val idle = synchronized(lock) { active == 0 && pending.isEmpty() }
+        if (idle) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
     // ---------------------------------------------------------------- jobs
 
-    private suspend fun runJob(job: Job) {
+    private suspend fun runJob(task: Task) {
         val dao = AppDatabase.getInstance(this).videoDao()
         val entity = VideoEntity(
-            title = job.title,
-            sourceUrl = job.url,
+            title = task.title,
+            sourceUrl = task.url,
             localPath = "",
             status = DownloadStatus.DOWNLOADING,
-            folderId = job.folderId,
-            mimeType = if (job.kind == Kind.YOUTUBE && job.ytFormat == YtFormat.MP3)
+            folderId = task.folderId,
+            mimeType = if (task.kind == Kind.YOUTUBE && task.ytFormat == YtFormat.MP3)
                 "audio/mpeg" else "video/mp4"
         )
         val id = dao.insert(entity)
         val nm = getSystemService(NotificationManager::class.java)
         val progressNotifId = PROGRESS_NOTIF_BASE + id.toInt()
 
+        // Publish this coroutine so the Library and the notification action can
+        // stop it, then honour a cancel that raced the insert.
+        currentCoroutineContext()[kotlinx.coroutines.Job]?.let { running[id] = it }
+        if (cancelledIds.remove(id)) {
+            running.remove(id)
+            dao.deleteById(id)
+            return
+        }
+
         // Computes a smoothed download speed and fans progress out to the
-        // Library (via the bus) and this download's own notification.
+        // Library (via the bus) and this download's own notification. Both are
+        // throttled: neither can use more than a few updates a second, and
+        // posting one per 64 KB read measurably slows the transfer down.
         val meter = SpeedMeter()
+        var lastReport = 0L
         val report: (Int, Long) -> Unit = { percent, bytes ->
-            val speed = meter.sample(bytes)
-            DownloadProgressBus.update(id, percent, speed)
-            nm.notify(progressNotifId, buildProgressNotification(job.title, percent, speed))
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastReport >= PROGRESS_INTERVAL_MS) {
+                lastReport = now
+                val speed = meter.sample(bytes)
+                DownloadProgressBus.update(id, percent, speed)
+                nm.notify(progressNotifId, buildProgressNotification(id, task.title, percent, speed))
+            }
         }
         // Post-download stages (mux, transcode) have no byte rate to report.
         val stage: (Int) -> Unit = { percent ->
             DownloadProgressBus.update(id, percent, 0L)
-            nm.notify(progressNotifId, buildProgressNotification(job.title, percent, 0L))
+            nm.notify(progressNotifId, buildProgressNotification(id, task.title, percent, 0L))
         }
 
         val scratch = mutableListOf<File>()
         try {
-            val produced = when (job.kind) {
-                Kind.GENERIC -> runGeneric(job, id, scratch, report)
-                Kind.YOUTUBE -> runYouTube(job, id, scratch, report, stage)
+            val produced = when (task.kind) {
+                Kind.GENERIC -> runGeneric(task, id, scratch, report)
+                Kind.YOUTUBE -> runYouTube(task, id, scratch, report, stage)
             }
+            // The transfer and transcode helpers report failure by returning
+            // rather than throwing, so a cancel can reach here looking like an
+            // error. Turn it back into one before anything is written.
+            currentCoroutineContext().ensureActive()
 
-            val published = if (produced == null) null else {
-                stage(99)
-                MediaStorage.publish(
-                    context = this,
-                    source = produced.file,
-                    displayName = produced.displayName,
-                    mimeType = produced.mimeType,
-                    folder = job.folderName
-                ) ?: keepPrivately(produced)
-            }
-
-            if (produced != null && published != null) {
-                dao.update(
-                    entity.copy(
-                        id = id,
-                        localPath = published,
-                        fileSizeBytes = produced.sizeBytes,
-                        durationMs = probeDurationMs(published),
+            // Publishing and the row update are one unit: a cancel landing
+            // between them would leave a file in shared storage that no library
+            // entry points at.
+            withContext(NonCancellable) {
+                val published = if (produced == null) null else {
+                    stage(99)
+                    MediaStorage.publish(
+                        context = this@DownloadService,
+                        source = produced.file,
+                        displayName = produced.displayName,
                         mimeType = produced.mimeType,
-                        status = DownloadStatus.COMPLETED
+                        folder = task.folderName
+                    ) ?: keepPrivately(produced)
+                }
+
+                if (produced != null && published != null) {
+                    dao.update(
+                        entity.copy(
+                            id = id,
+                            localPath = published,
+                            fileSizeBytes = produced.sizeBytes,
+                            durationMs = probeDurationMs(published),
+                            mimeType = produced.mimeType,
+                            status = DownloadStatus.COMPLETED
+                        )
                     )
-                )
-                showDoneNotification(id, job.title, ok = true)
-            } else {
-                dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
-                showDoneNotification(id, job.title, ok = false)
+                    showDoneNotification(id, task.title, ok = true)
+                } else {
+                    dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
+                    showDoneNotification(id, task.title, ok = false)
+                }
             }
+        } catch (e: CancellationException) {
+            // Deliberate stop. Nothing was produced, so the row goes away —
+            // whether the Library already removed it or the cancel came from
+            // the notification action, which leaves it behind.
+            withContext(NonCancellable) { dao.deleteById(id) }
+            throw e
         } catch (e: Exception) {
-            dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
-            showDoneNotification(id, job.title, ok = false)
+            withContext(NonCancellable) {
+                dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
+            }
+            showDoneNotification(id, task.title, ok = false)
         } finally {
+            running.remove(id)
+            cancelledIds.remove(id)
             scratch.forEach { runCatching { it.delete() } }
             DownloadProgressBus.clear(id)
             nm.cancel(progressNotifId)
@@ -307,29 +391,29 @@ class DownloadService : Service() {
     )
 
     private suspend fun runGeneric(
-        job: Job,
+        task: Task,
         id: Long,
         scratch: MutableList<File>,
         report: (Int, Long) -> Unit
     ): Produced? {
-        val sanitized = MediaStorage.sanitizeName(job.title)
-        val videoType = detectVideoType(job.url)
+        val sanitized = MediaStorage.sanitizeName(task.title)
+        val videoType = detectVideoType(task.url)
         val extension = when (videoType) {
             // The native HLS downloader concatenates transport-stream segments.
             VideoType.HLS -> "ts"
             VideoType.DASH -> "mp4"
             VideoType.DIRECT ->
-                job.url.substringAfterLast('.').substringBefore('?')
+                task.url.substringAfterLast('.').substringBefore('?')
                     .takeIf { it.length in 2..4 } ?: "mp4"
         }
         val output = File(workDir, "$sanitized-$id.$extension").also { scratch.add(it) }
 
         val ok = when (videoType) {
-            VideoType.HLS -> hlsDownloader.download(job.url, output, job.headers, report)
+            VideoType.HLS -> hlsDownloader.download(task.url, output, task.headers, report)
             // DASH and direct are both fetched progressively; ExoPlayer plays
             // most progressive MP4/WebM. (Multi-track DASH muxing isn't supported.)
             VideoType.DASH, VideoType.DIRECT ->
-                downloadDirect(job.url, output, job.headers, report)
+                downloadDirect(task.url, output, task.headers, report)
         }
         if (!ok || !output.exists()) return null
         return Produced(
@@ -341,30 +425,31 @@ class DownloadService : Service() {
     }
 
     private suspend fun runYouTube(
-        job: Job,
+        task: Task,
         id: Long,
         scratch: MutableList<File>,
         report: (Int, Long) -> Unit,
         stage: (Int) -> Unit
     ): Produced? {
-        YouTubeResolver.ensureInitialised(job.userAgent.ifBlank { DEFAULT_USER_AGENT })
+        YouTubeResolver.ensureInitialised(task.userAgent.ifBlank { DEFAULT_USER_AGENT })
         val resolved = withContext(Dispatchers.IO) {
-            runCatching { YouTubeResolver.resolveVideo(job.url) }.getOrNull()
+            runCatching { YouTubeResolver.resolveVideo(task.url) }.getOrNull()
         } ?: return null
+        currentCoroutineContext().ensureActive()
 
         val sanitized = MediaStorage.sanitizeName(
-            job.title.ifBlank { resolved.title }
+            task.title.ifBlank { resolved.title }
         )
 
-        return if (job.ytFormat == YtFormat.MP3) {
-            runYouTubeMp3(job, id, resolved, sanitized, scratch, report, stage)
+        return if (task.ytFormat == YtFormat.MP3) {
+            runYouTubeMp3(task, id, resolved, sanitized, scratch, report, stage)
         } else {
-            runYouTubeMp4(job, id, resolved, sanitized, scratch, report, stage)
+            runYouTubeMp4(task, id, resolved, sanitized, scratch, report, stage)
         }
     }
 
     private suspend fun runYouTubeMp4(
-        job: Job,
+        task: Task,
         id: Long,
         resolved: YouTubeResolver.Resolved,
         sanitized: String,
@@ -372,7 +457,7 @@ class DownloadService : Service() {
         report: (Int, Long) -> Unit,
         stage: (Int) -> Unit
     ): Produced? {
-        val option = pickVideoOption(resolved.videoOptions, job.ytHeight) ?: return null
+        val option = pickVideoOption(resolved.videoOptions, task.ytHeight) ?: return null
 
         if (!option.needsMux) {
             val output = File(workDir, "$sanitized-$id.mp4").also { scratch.add(it) }
@@ -402,7 +487,7 @@ class DownloadService : Service() {
     }
 
     private suspend fun runYouTubeMp3(
-        job: Job,
+        task: Task,
         id: Long,
         resolved: YouTubeResolver.Resolved,
         sanitized: String,
@@ -422,12 +507,18 @@ class DownloadService : Service() {
         // Pure-Java LAME: slow enough that the user needs to see it moving.
         val output = File(workDir, "$sanitized-$id.mp3").also { scratch.add(it) }
         val ok = withContext(Dispatchers.Default) {
+            val ctx = coroutineContext
             Mp3Transcoder.transcode(
                 input = audioPart,
                 output = output,
-                bitrateKbps = job.mp3Bitrate,
+                bitrateKbps = task.mp3Bitrate,
                 durationUsHint = resolved.durationSeconds * 1_000_000
-            ) { p -> stage(scalePercent(p, 45, 95)) }
+            ) { p ->
+                // The encode loop never suspends, so this callback is the only
+                // place a cancel can break into it.
+                ctx.ensureActive()
+                stage(scalePercent(p, 45, 95))
+            }
         }
         if (!ok) return null
         return Produced(output, "$sanitized.mp3", "audio/mpeg", output.length())
@@ -472,41 +563,17 @@ class DownloadService : Service() {
         }
     }
 
+    /**
+     * A single file over HTTP. Split into concurrent byte ranges where the
+     * server allows it — that is what keeps YouTube's per-response throttle
+     * from pinning a long video to playback speed.
+     */
     private suspend fun downloadDirect(
         url: String,
         output: File,
         headers: Map<String, String>,
         onProgress: (Int, Long) -> Unit
-    ): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val request = Request.Builder().url(url).apply {
-                    headers.forEach { (k, v) -> if (v.isNotBlank()) header(k, v) }
-                }.build()
-                val response = client.newCall(request).execute()
-                if (!response.isSuccessful) return@withContext false
-                val body = response.body ?: return@withContext false
-                val total = body.contentLength()
-                var downloaded = 0L
-                FileOutputStream(output).buffered(1 shl 16).use { fos ->
-                    body.byteStream().use { input ->
-                        val buffer = ByteArray(1 shl 16) // 64 KB
-                        var read: Int
-                        while (input.read(buffer).also { read = it } != -1) {
-                            fos.write(buffer, 0, read)
-                            downloaded += read
-                            // Unknown total (chunked) → indeterminate percent (-1).
-                            val percent = if (total > 0) (downloaded * 100 / total).toInt() else -1
-                            onProgress(percent, downloaded)
-                        }
-                    }
-                }
-                true
-            } catch (e: Exception) {
-                false
-            }
-        }
-    }
+    ): Boolean = rangedDownloader.download(url, output, headers, onProgress)
 
     /** Smoothed bytes/sec, recomputed at most every ~0.5s. */
     private class SpeedMeter {
@@ -561,8 +628,24 @@ class DownloadService : Service() {
             .build()
     }
 
+    /** Stops the download filling row [videoId] straight from the shade. */
+    private fun cancelIntent(videoId: Long): PendingIntent = PendingIntent.getService(
+        this,
+        videoId.toInt(),
+        Intent(this, DownloadService::class.java).apply {
+            action = ACTION_CANCEL
+            putExtra(EXTRA_VIDEO_ID, videoId)
+        },
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
     /** Per-download progress notification with percent + speed. */
-    private fun buildProgressNotification(title: String, progress: Int, speedBps: Long): Notification {
+    private fun buildProgressNotification(
+        videoId: Long,
+        title: String,
+        progress: Int,
+        speedBps: Long
+    ): Notification {
         val indeterminate = progress < 0
         val pct = progress.coerceIn(0, 100)
         val line = buildString {
@@ -579,6 +662,11 @@ class DownloadService : Service() {
             .setContentText(line)
             .setProgress(100, pct, indeterminate)
             .setContentIntent(contentIntent())
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                getString(R.string.cancel_download),
+                cancelIntent(videoId)
+            )
             .setOnlyAlertOnce(true)
             .build()
     }
@@ -610,6 +698,8 @@ class DownloadService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         scope.cancel()
+        running.clear()
+        cancelledIds.clear()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

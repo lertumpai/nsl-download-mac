@@ -16,6 +16,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.nsl.downloader.R
+import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.FolderEntity
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.databinding.FragmentLibraryBinding
@@ -242,12 +243,29 @@ class LibraryFragment : Fragment() {
         )
     }
 
+    /**
+     * Doubles as the cancel affordance: for a row that is still transferring,
+     * removing it is what stops the download.
+     */
     private fun confirmDeleteSingle(video: VideoEntity) {
+        val inFlight = video.status == DownloadStatus.DOWNLOADING ||
+            video.status == DownloadStatus.PENDING
         MaterialAlertDialogBuilder(requireContext())
-            .setTitle("Remove video")
-            .setMessage("Remove \"${video.title}\" and delete its file from this device?")
-            .setPositiveButton("Remove") { _, _ -> viewModel.removeVideo(video) }
-            .setNegativeButton("Cancel", null)
+            .setTitle(if (inFlight) R.string.cancel_download else R.string.remove_video_title)
+            .setMessage(
+                getString(
+                    if (inFlight) R.string.cancel_download_message
+                    else R.string.remove_video_message,
+                    video.title
+                )
+            )
+            .setPositiveButton(if (inFlight) R.string.cancel_download else R.string.remove) { _, _ ->
+                viewModel.removeVideo(video)
+            }
+            // "Cancel" would read as "cancel the download" on the in-flight path.
+            .setNegativeButton(
+                if (inFlight) R.string.keep_downloading else android.R.string.cancel, null
+            )
             .show()
     }
 
@@ -256,10 +274,7 @@ class LibraryFragment : Fragment() {
         val scope = folderName ?: getString(R.string.library_all).lowercase()
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.remove_all)
-            .setMessage(
-                "This deletes every downloaded video in $scope and all their files. " +
-                    "This cannot be undone."
-            )
+            .setMessage(getString(R.string.remove_all_message, scope))
             .setPositiveButton(R.string.remove_all) { _, _ -> viewModel.removeAll() }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

@@ -1,5 +1,6 @@
 package com.nsl.downloader.service
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -107,7 +108,7 @@ class HlsDownloader(private val client: OkHttpClient) {
             for (batch in segments.chunked(PARALLELISM)) {
                 val fetched = batch.map { seg ->
                     async(Dispatchers.IO) {
-                        val data = fetchBytes(seg.url, headers) ?: return@async null
+                        val data = fetchSegment(seg.url, headers) ?: return@async null
                         if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
                     }
                 }.awaitAll()
@@ -146,6 +147,21 @@ class HlsDownloader(private val client: OkHttpClient) {
             if (!r.isSuccessful) null else r.body?.bytes()
         }
     }.getOrNull()
+
+    /**
+     * Same as [fetchBytes], but abandons the socket the moment the download is
+     * cancelled instead of running the segment to completion first.
+     */
+    private suspend fun fetchSegment(url: String, headers: Map<String, String>): ByteArray? =
+        try {
+            useCall(client.newCall(buildRequest(url, headers))) { r ->
+                if (!r.isSuccessful) null else r.body?.bytes()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
 
     private fun parseMediaPlaylist(mediaUrl: String, headers: Map<String, String>): List<Segment>? {
         val text = fetchText(mediaUrl, headers) ?: return null

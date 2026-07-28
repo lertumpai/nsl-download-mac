@@ -111,6 +111,8 @@ dependencies {
     // YouTube stream/playlist extraction (signature + n-param descrambling via Rhino).
     implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.4'
 
+    testImplementation 'junit:junit:4.13.2'
+
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
     androidTestImplementation 'androidx.test:runner:1.5.2'
     androidTestImplementation 'androidx.test:rules:1.5.0'

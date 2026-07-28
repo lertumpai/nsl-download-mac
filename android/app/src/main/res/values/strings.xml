@@ -87,4 +87,12 @@
     <string name="library_play">Play</string>
     <string name="library_share">Share</string>
     <string name="library_empty_folder">This folder is empty.</string>
+
+    <!-- Removing / cancelling -->
+    <string name="cancel_download">Cancel download</string>
+    <string name="cancel_download_message">Stop downloading “%1$s”? The partial file is discarded.</string>
+    <string name="keep_downloading">Keep downloading</string>
+    <string name="remove_video_title">Remove video</string>
+    <string name="remove_video_message">Remove “%1$s” and delete its file from this device?</string>
+    <string name="remove_all_message">This deletes every downloaded video in %1$s and all their files, and cancels anything still downloading. This cannot be undone.</string>
 </resources>
