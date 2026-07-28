@@ -147,7 +147,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun stopIfDownloading(video: VideoEntity) {
         if (video.status == DownloadStatus.DOWNLOADING || video.status == DownloadStatus.PENDING) {
-            DownloadService.cancel(video.id)
+            DownloadService.cancel(getApplication(), video.id)
         }
     }
 

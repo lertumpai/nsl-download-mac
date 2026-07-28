@@ -22,6 +22,12 @@ class YouTubeClassifyWithoutInitTest {
             YouTubeResolver.classify("https://m.youtube.com/watch?v=jNQXAC9IVRw")
         )
         assertEquals(
+            YouTubeResolver.Kind.STREAM,
+            YouTubeResolver.classify(
+                "https://m.youtube.com/watch?v=jNQXAC9IVRw&list=RDjNQXAC9IVRw"
+            )
+        )
+        assertEquals(
             YouTubeResolver.Kind.PLAYLIST,
             YouTubeResolver.classify(
                 "https://www.youtube.com/playlist?list=PL590L5WQmH8dpP0RyH5pCfIaDEdt9nk7r"

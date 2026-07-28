@@ -85,6 +85,11 @@ object YouTubeResolver {
      */
     fun classify(url: String): Kind {
         if (!isYouTubeUrl(url)) return Kind.OTHER
+        // NewPipe can classify mobile watch URLs carrying `list=` as playlists.
+        // The WebView uses exactly that form for mixes and autoplay queues, so
+        // recognise concrete video routes first and keep the current video
+        // available as a single-download choice.
+        if (isVideoPageUrl(url)) return Kind.STREAM
         return runCatching {
             when (youTube.getLinkTypeByUrl(url)) {
                 StreamingService.LinkType.STREAM -> Kind.STREAM
@@ -93,6 +98,24 @@ object YouTubeResolver {
             }
         }.getOrDefault(Kind.OTHER)
     }
+
+    private fun isVideoPageUrl(url: String): Boolean = runCatching {
+        val uri = android.net.Uri.parse(url)
+        val host = uri.host.orEmpty()
+            .removePrefix("www.")
+            .removePrefix("m.")
+            .lowercase()
+        if (host == "youtu.be") {
+            return@runCatching uri.pathSegments.firstOrNull().orEmpty().isNotBlank()
+        }
+        val route = uri.pathSegments.firstOrNull().orEmpty().lowercase()
+        when (route) {
+            "watch" -> !uri.getQueryParameter("v").isNullOrBlank()
+            "shorts", "live", "embed" ->
+                uri.pathSegments.getOrNull(1).orEmpty().isNotBlank()
+            else -> false
+        }
+    }.getOrDefault(false)
 
     /** True when a watch URL is part of a playlist we could also grab whole. */
     fun playlistIdOf(url: String): String? = runCatching {

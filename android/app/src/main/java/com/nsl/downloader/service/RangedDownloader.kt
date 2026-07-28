@@ -49,6 +49,7 @@ class RangedDownloader(base: OkHttpClient) {
         private const val CHUNK_SIZE = 2L shl 20   // 2 MB per range request
         private const val BUFFER_SIZE = 1 shl 16   // 64 KB
         private const val MAX_ATTEMPTS = 3
+        private const val MAX_WHOLE_ATTEMPTS = 5
         private const val RETRY_DELAY_MS = 300L
 
         /** Under this the connection setup costs more than the split saves. */
@@ -288,36 +289,75 @@ class RangedDownloader(base: OkHttpClient) {
         headers: Map<String, String>,
         onProgress: (Int, Long) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            useCall(client.newCall(buildRequest(url, headers, null, null))) { response ->
-                if (!response.isSuccessful) return@useCall false
-                val body = response.body ?: return@useCall false
-                val total = body.contentLength()
-                var downloaded = 0L
-                FileOutputStream(output).buffered(BUFFER_SIZE).use { out ->
-                    body.byteStream().use { input ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read <= 0) break
-                            RateLimiter.acquire(read)
-                            out.write(buffer, 0, read)
-                            downloaded += read
-                            // Unknown total (chunked) → indeterminate percent (-1).
-                            onProgress(
-                                if (total > 0) (downloaded * 100 / total).toInt() else -1,
-                                downloaded
-                            )
+        var downloaded = 0L
+        var total = -1L
+        var attempt = 0
+
+        while (attempt < MAX_WHOLE_ATTEMPTS) {
+            currentCoroutineContext().ensureActive()
+            val resumeAt = downloaded.takeIf { it > 0L }
+            var reachedEof = false
+            val accepted = try {
+                useCall(client.newCall(buildRequest(url, headers, resumeAt, null))) { response ->
+                    if (!response.isSuccessful) return@useCall false
+                    val body = response.body ?: return@useCall false
+
+                    // If the origin ignores the resume Range and replies 200,
+                    // restart cleanly instead of appending a second copy.
+                    if (resumeAt != null && response.code != 206) {
+                        downloaded = 0L
+                        output.delete()
+                    }
+
+                    val responseTotal = response.header("Content-Range")
+                        ?.substringAfterLast('/')
+                        ?.trim()
+                        ?.toLongOrNull()
+                        ?: body.contentLength().takeIf { it >= 0L }?.let { downloaded + it }
+                        ?: -1L
+                    if (responseTotal > 0L) total = responseTotal
+
+                    FileOutputStream(output, downloaded > 0L).buffered(BUFFER_SIZE).use { out ->
+                        body.byteStream().use { input ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                RateLimiter.acquire(read)
+                                out.write(buffer, 0, read)
+                                downloaded += read
+                                // Unknown total (chunked) → indeterminate percent (-1).
+                                onProgress(
+                                    if (total > 0L) {
+                                        (downloaded * 100 / total).coerceAtMost(100).toInt()
+                                    } else {
+                                        -1
+                                    },
+                                    downloaded
+                                )
+                            }
                         }
                     }
+                    reachedEof = true
+                    true
                 }
-                true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            false
+
+            if (accepted && reachedEof && (total <= 0L || downloaded >= total)) {
+                return@withContext true
+            }
+
+            currentCoroutineContext().ensureActive()
+            attempt++
+            if (attempt < MAX_WHOLE_ATTEMPTS) {
+                delay(RETRY_DELAY_MS * attempt)
+            }
         }
+        false
     }
 
     private fun buildRequest(

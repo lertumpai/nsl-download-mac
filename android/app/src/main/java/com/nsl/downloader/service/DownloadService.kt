@@ -85,9 +85,26 @@ class DownloadService : Service() {
          * partial file. A no-op for rows that already finished, so callers do
          * not have to check first.
          */
-        fun cancel(videoId: Long) {
+        private fun cancelRunning(videoId: Long) {
             cancelledIds.add(videoId)
-            running.remove(videoId)?.cancel(CancellationException("cancelled by user"))
+            running[videoId]?.cancel(CancellationException("cancelled by user"))
+        }
+
+        /**
+         * Cancels the coroutine immediately and also tells the live service to
+         * remove its progress/foreground notifications without waiting for
+         * socket, muxer or MediaStore cleanup to unwind.
+         */
+        fun cancel(context: Context, videoId: Long) {
+            cancelRunning(videoId)
+            runCatching {
+                context.startService(
+                    Intent(context, DownloadService::class.java).apply {
+                        action = ACTION_CANCEL
+                        putExtra(EXTRA_VIDEO_ID, videoId)
+                    }
+                )
+            }
         }
 
         /**
@@ -262,7 +279,12 @@ class DownloadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
-            intent.getLongExtra(EXTRA_VIDEO_ID, -1L).takeIf { it >= 0 }?.let { cancel(it) }
+            intent.getLongExtra(EXTRA_VIDEO_ID, -1L).takeIf { it >= 0 }?.let { videoId ->
+                cancelRunning(videoId)
+                getSystemService(NotificationManager::class.java)
+                    .cancel(PROGRESS_NOTIF_BASE + videoId.toInt())
+                refreshForegroundNotification()
+            }
             // Normally the cancelled job's own teardown stops us via pump();
             // this covers an id that was already gone when the action arrived.
             stopIfIdle()
@@ -369,9 +391,12 @@ class DownloadService : Service() {
         batchOfVideo.entries
             .filter { it.value == batchId }
             .map { it.key }
-            .forEach { cancel(it) }
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIF_ID, summaryNotification())
+            .forEach { videoId ->
+                cancelRunning(videoId)
+                getSystemService(NotificationManager::class.java)
+                    .cancel(PROGRESS_NOTIF_BASE + videoId.toInt())
+            }
+        refreshForegroundNotification()
     }
 
     /** Tears the service down once nothing is left to transfer. */
@@ -631,7 +656,15 @@ class DownloadService : Service() {
 
         stage(92)
         val output = File(workDir, "$sanitized-$id.mp4").also { scratch.add(it) }
-        if (!Mp4Muxer.mux(videoPart, audioPart, output)) return null
+        val job = currentCoroutineContext()[kotlinx.coroutines.Job]
+        if (!Mp4Muxer.mux(
+                videoPart,
+                audioPart,
+                output,
+                onProgress = { progress -> stage(scalePercent(progress, 92, 98)) },
+                checkCancelled = { job?.ensureActive() }
+            )
+        ) return null
         return Produced(output, "$sanitized.mp4", "video/mp4", output.length())
     }
 
@@ -764,8 +797,10 @@ class DownloadService : Service() {
     )
 
     /** The ongoing foreground notification summarising how many downloads run. */
-    private fun summaryNotification(): Notification {
-        val count = synchronized(lock) { active + pending.size }.coerceAtLeast(1)
+    private fun summaryNotification(countOverride: Int? = null): Notification {
+        val count = (
+            countOverride ?: synchronized(lock) { active + pending.size }
+            ).coerceAtLeast(1)
         val batches = DownloadQueueBus.state.value
         val single = batches.singleOrNull()
         val text = when {
@@ -792,6 +827,24 @@ class DownloadService : Service() {
                 )
         }
         return builder.build()
+    }
+
+    /**
+     * A cancelled coroutine may still be unwinding native/media cleanup. Hide
+     * it from the foreground summary immediately; if nothing else remains,
+     * remove the control-bar notification now instead of waiting for finally.
+     */
+    private fun refreshForegroundNotification() {
+        val cancelledRunning = cancelledIds.count { running.containsKey(it) }
+        val remaining = synchronized(lock) {
+            (active - cancelledRunning).coerceAtLeast(0) + pending.size
+        }
+        if (remaining == 0) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIF_ID, summaryNotification(remaining))
+        }
     }
 
     /** Stops the download filling row [videoId] straight from the shade. */

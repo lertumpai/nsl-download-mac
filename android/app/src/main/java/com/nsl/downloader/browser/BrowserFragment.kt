@@ -625,10 +625,8 @@ class BrowserFragment : Fragment() {
      * Entry point for a YouTube page. What gets asked depends on what the page
      * actually is:
      *
-     *  - a video that also sits in a playlist → *what* first (this one or all
-     *    of them), then the format. Offering all four combinations at once made
-     *    "Video (MP4)" and "Whole playlist as MP4" look like variants of the
-     *    same thing.
+     *  - a video that also sits in a playlist → format first, then whether to
+     *    download just this video or selected entries from the playlist.
      *  - a plain video → just the format.
      *  - a playlist page → the format, then the per-video picker.
      */
@@ -644,18 +642,54 @@ class BrowserFragment : Fragment() {
         }
 
         when {
-            isStream && listUrl != null -> chooseScope(pageUrl, pageTitle, listUrl)
+            isStream && listUrl != null -> chooseFormatAndScope(pageUrl, pageTitle, listUrl)
             isStream -> chooseSingleFormat(pageUrl, pageTitle)
             listUrl != null -> choosePlaylistFormat(listUrl)
             else -> showVideoPicker()
         }
     }
 
-    /** One video, or every video in the list it belongs to. */
-    private fun chooseScope(pageUrl: String, pageTitle: String, listUrl: String) {
+    /**
+     * Pick MP4/MP3 first. This mirrors the Download button wording and makes
+     * scope an explicit second decision instead of silently entering playlist
+     * mode for mobile YouTube mix URLs.
+     */
+    private fun chooseFormatAndScope(pageUrl: String, pageTitle: String, listUrl: String) {
         val actions = listOf<Pair<String, () -> Unit>>(
-            getString(R.string.yt_scope_single) to { chooseSingleFormat(pageUrl, pageTitle) },
-            getString(R.string.yt_scope_playlist) to { choosePlaylistFormat(listUrl) }
+            getString(R.string.yt_video_mp4) to {
+                chooseScope(pageUrl, pageTitle, listUrl, DownloadService.YtFormat.MP4)
+            },
+            getString(R.string.yt_audio_mp3) to {
+                chooseScope(pageUrl, pageTitle, listUrl, DownloadService.YtFormat.MP3)
+            }
+        )
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.yt_download_title)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** One video, or selected entries from the list it belongs to. */
+    private fun chooseScope(
+        pageUrl: String,
+        pageTitle: String,
+        listUrl: String,
+        format: DownloadService.YtFormat
+    ) {
+        val single: () -> Unit = when (format) {
+            DownloadService.YtFormat.MP4 -> {
+                { chooseMp4Quality(pageUrl, pageTitle) }
+            }
+            DownloadService.YtFormat.MP3 -> {
+                { chooseMp3Bitrate(pageUrl, pageTitle) }
+            }
+        }
+        val actions = listOf<Pair<String, () -> Unit>>(
+            getString(R.string.yt_scope_single) to single,
+            getString(R.string.yt_scope_playlist) to { downloadPlaylist(listUrl, format) }
         )
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.yt_scope_title)

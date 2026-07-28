@@ -6,6 +6,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.concurrent.CancellationException
 
 /**
  * Remuxes a video-only track and an audio-only track into one MP4.
@@ -22,7 +23,13 @@ object Mp4Muxer {
 
     private const val DEFAULT_BUFFER_BYTES = 1 shl 20
 
-    fun mux(videoFile: File, audioFile: File, output: File): Boolean {
+    fun mux(
+        videoFile: File,
+        audioFile: File,
+        output: File,
+        onProgress: (Int) -> Unit = {},
+        checkCancelled: () -> Unit = {}
+    ): Boolean {
         var muxer: MediaMuxer? = null
         val videoExtractor = MediaExtractor()
         val audioExtractor = MediaExtractor()
@@ -47,9 +54,15 @@ object Mp4Muxer {
                 maxInputSize(videoFormat), maxInputSize(audioFormat), DEFAULT_BUFFER_BYTES
             )
             val buffer = ByteBuffer.allocate(bufferSize)
-            copyTrack(videoExtractor, muxer, outVideo, buffer)
-            copyTrack(audioExtractor, muxer, outAudio, buffer)
+            copyTrack(videoExtractor, videoFormat, muxer, outVideo, buffer, 0, 70,
+                onProgress, checkCancelled)
+            copyTrack(audioExtractor, audioFormat, muxer, outAudio, buffer, 70, 100,
+                onProgress, checkCancelled)
+            checkCancelled()
             return true
+        } catch (e: CancellationException) {
+            output.delete()
+            throw e
         } catch (e: Exception) {
             output.delete()
             return false
@@ -77,12 +90,38 @@ object Mp4Muxer {
 
     private fun copyTrack(
         extractor: MediaExtractor,
+        format: MediaFormat,
         muxer: MediaMuxer,
         outputTrack: Int,
-        buffer: ByteBuffer
+        buffer: ByteBuffer,
+        progressFrom: Int,
+        progressTo: Int,
+        onProgress: (Int) -> Unit,
+        checkCancelled: () -> Unit
     ) {
         val info = MediaCodec.BufferInfo()
+        val durationUs = runCatching {
+            format.getLong(MediaFormat.KEY_DURATION)
+        }.getOrDefault(0L)
+        var lastProgress = -1
+        fun report(sampleTimeUs: Long, complete: Boolean = false) {
+            val progress = if (complete || durationUs <= 0L) {
+                if (complete) progressTo else progressFrom
+            } else {
+                progressFrom + (
+                    sampleTimeUs.coerceIn(0L, durationUs) *
+                        (progressTo - progressFrom) / durationUs
+                    ).toInt()
+            }
+            if (progress != lastProgress) {
+                lastProgress = progress
+                onProgress(progress)
+            }
+        }
+
+        report(0L)
         while (true) {
+            checkCancelled()
             buffer.clear()
             val size = extractor.readSampleData(buffer, 0)
             if (size < 0) break
@@ -91,8 +130,14 @@ object Mp4Muxer {
             info.presentationTimeUs = extractor.sampleTime
             info.flags = sampleFlagsToBufferFlags(extractor.sampleFlags)
             muxer.writeSampleData(outputTrack, buffer, info)
-            extractor.advance()
+            report(info.presentationTimeUs)
+            // Some device extractors keep exposing the final sample after
+            // advance() returns false. Respecting its result prevents an
+            // endless final-sample write that leaves the UI parked at 92%.
+            if (!extractor.advance()) break
         }
+        checkCancelled()
+        report(durationUs, complete = true)
     }
 
     /** `MediaExtractor.SAMPLE_FLAG_*` and `MediaCodec.BUFFER_FLAG_*` differ. */

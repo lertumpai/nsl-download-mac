@@ -82,6 +82,19 @@ class RangedDownloaderTest {
         assertArrayEquals(server.payload, output.readBytes())
     }
 
+    /** A short 200 response must resume/retry instead of accepting a partial file. */
+    @Test
+    fun `single stream retries a premature end near completion`() {
+        server = FakeRangeServer(
+            payloadOf(512 * 1024),
+            honourRanges = false,
+            truncateWholeFirst = 2
+        )
+        assertTrue(download())
+        assertArrayEquals(server.payload, output.readBytes())
+        assertTrue("expected the whole stream to be retried", server.wholeRequests.get() > 1)
+    }
+
     /**
      * The transfer loop blocks in a socket read, which coroutine cancellation
      * cannot interrupt on its own — the download has to stop anyway, and fast,
@@ -124,13 +137,16 @@ class RangedDownloaderTest {
         val payload: ByteArray,
         private val honourRanges: Boolean = true,
         truncateFirst: Int = 0,
+        truncateWholeFirst: Int = 0,
         /** Drip the body out so a transfer stays in flight long enough to cancel. */
         private val trickle: Boolean = false
     ) : AutoCloseable {
 
         private val socket = ServerSocket(0)
         private val truncationsLeft = AtomicInteger(truncateFirst)
+        private val wholeTruncationsLeft = AtomicInteger(truncateWholeFirst)
         val rangeRequests = AtomicInteger(0)
+        val wholeRequests = AtomicInteger(0)
 
         val url: String get() = "http://127.0.0.1:${socket.localPort}/video.mp4"
 
@@ -158,6 +174,7 @@ class RangedDownloaderTest {
             val out = client.getOutputStream()
             val spec = range?.takeIf { honourRanges }?.removePrefix("bytes=")
             if (spec == null) {
+                wholeRequests.incrementAndGet()
                 out.write(
                     header(
                         "200 OK",
@@ -165,7 +182,12 @@ class RangedDownloaderTest {
                         "Accept-Ranges: bytes"
                     )
                 )
-                out.write(payload)
+                val send = if (wholeTruncationsLeft.getAndDecrement() > 0) {
+                    payload.size / 2
+                } else {
+                    payload.size
+                }
+                out.write(payload, 0, send)
                 out.flush()
                 return
             }
