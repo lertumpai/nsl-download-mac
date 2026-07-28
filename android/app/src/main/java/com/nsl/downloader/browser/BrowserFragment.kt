@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
@@ -106,6 +107,9 @@ class BrowserFragment : Fragment() {
                     super.onPageFinished(view, url)
                     injectBackgroundScript(view)
                     injectAdBlockScript(view)
+                    if (pictureInPictureActive && this@Tab === currentTab) {
+                        view?.evaluateJavascript(BrowserScripts.PIP_FIT_ON, null)
+                    }
                     if (this@Tab === currentTab) {
                         binding.progressBar.visibility = View.GONE
                         updateFab()
@@ -211,6 +215,7 @@ class BrowserFragment : Fragment() {
     private val tabs = mutableListOf<Tab>()
     private var currentTabIndex = 0
     private var playbackServiceRunning = false
+    private var pictureInPictureActive = false
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val stopPlaybackRunnable = Runnable { stopPlaybackServiceNow() }
     private val currentTab get() = tabs[currentTabIndex]
@@ -244,8 +249,55 @@ class BrowserFragment : Fragment() {
      * so the page-level hooks cannot stop it. Pinning the reported visibility
      * first is what keeps the video running into the floating window.
      */
-    fun onEnteringPictureInPicture() {
+    fun prepareForPictureInPicture(onReady: () -> Unit) {
+        pictureInPictureActive = true
         tabs.forEach { it.webView.backgroundPlaybackEnabled = true }
+        // Normal browsing deliberately uses a wide overview viewport. In a
+        // tiny PiP window that preserves the old phone-width layout and Android
+        // displays only a cropped strip of YouTube's video. Let the viewport
+        // follow the actual window while PiP is being prepared.
+        currentWebView.settings.useWideViewPort = false
+        currentWebView.settings.loadWithOverviewMode = false
+        currentWebView.setBackgroundColor(android.graphics.Color.BLACK)
+        binding.root.setBackgroundColor(android.graphics.Color.BLACK)
+
+        currentWebView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
+        currentWebView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
+
+        var delivered = false
+        fun ready() {
+            if (delivered) return
+            delivered = true
+            currentWebView.requestLayout()
+            currentWebView.invalidate()
+            // Give Chromium one draw after the CSS change so Android captures
+            // the video surface, not the old white responsive-page viewport.
+            currentWebView.postOnAnimation(onReady)
+        }
+        currentWebView.evaluateJavascript(BrowserScripts.PIP_FIT_PREPARE) { ready() }
+        // A broken page must not be able to block PiP forever by withholding
+        // the JavaScript callback.
+        uiHandler.postDelayed({ ready() }, PIP_PREPARE_TIMEOUT_MS)
+    }
+
+    /**
+     * Screen-space rectangle occupied by [PIP_FIT_PREPARE]. Supplying it to
+     * Android prevents the system from scaling/cropping the whole portrait
+     * browser when it creates a 16:9 floating window.
+     */
+    fun pictureInPictureSourceRect(): Rect? {
+        if (_binding == null) return null
+        val rect = Rect()
+        if (!currentWebView.getGlobalVisibleRect(rect) || rect.width() <= 0) return null
+        val videoHeight = (rect.width() * 9 / 16).coerceAtMost(rect.height())
+        rect.bottom = rect.top + videoHeight
+        return rect
+    }
+
+    /** Undo preparation if Android rejects the PiP request. */
+    fun onPictureInPictureEntryFailed() {
+        if (!pictureInPictureActive) return
+        leavePictureInPictureLayout()
     }
 
     /**
@@ -255,6 +307,7 @@ class BrowserFragment : Fragment() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode)
         if (_binding == null) return
+        pictureInPictureActive = isInPictureInPictureMode
         binding.topBar.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
         binding.progressBar.visibility = View.GONE
         if (isInPictureInPictureMode) binding.fabDownload.hide() else updateFab()
@@ -266,18 +319,28 @@ class BrowserFragment : Fragment() {
                 it.webView.evaluateJavascript(BrowserScripts.PAUSE_GUARD, null)
                 it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(true), null)
             }
+            currentWebView.evaluateJavascript(BrowserScripts.PIP_FIT_ON, null)
+            currentWebView.setBackgroundColor(android.graphics.Color.BLACK)
+            binding.root.setBackgroundColor(android.graphics.Color.BLACK)
             // Belt and braces: if the transition still managed to pause the
             // video, start it again once the window has settled.
             resumeMediaSoon()
         } else {
-            tabs.forEach {
-                it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(false), null)
-            }
-            // Back to a normal window: only background mode may keep pinning
-            // visibility, otherwise media should pause when the app goes away.
-            val pin = prefs.backgroundPlaybackEnabled
-            tabs.forEach { it.webView.backgroundPlaybackEnabled = pin }
+            leavePictureInPictureLayout()
         }
+    }
+
+    private fun leavePictureInPictureLayout() {
+        pictureInPictureActive = false
+        tabs.forEach {
+            it.webView.evaluateJavascript(BrowserScripts.PIP_FIT_OFF, null)
+            it.webView.evaluateJavascript(BrowserScripts.setPauseBlocked(false), null)
+            it.webView.backgroundPlaybackEnabled = prefs.backgroundPlaybackEnabled
+            it.webView.settings.useWideViewPort = true
+            it.webView.settings.loadWithOverviewMode = true
+            it.webView.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        }
+        if (_binding != null) binding.root.setBackgroundColor(android.graphics.Color.TRANSPARENT)
     }
 
     private fun resumeMediaSoon() {
@@ -1068,5 +1131,6 @@ class BrowserFragment : Fragment() {
 
         /** Grace period before the playback service is torn down. */
         const val PLAYBACK_STOP_DELAY_MS = 30_000L
+        const val PIP_PREPARE_TIMEOUT_MS = 300L
     }
 }

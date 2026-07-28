@@ -143,15 +143,134 @@ object BrowserScripts {
         "(function(){ window.__nslBlockPause = $blocked; })();"
 
     /**
-     * Stretches the playing video over the whole viewport.
+     * Stretches the currently playing video over the whole viewport.
      *
-     * A Picture-in-Picture window shows whatever the activity shows, which for
-     * a browser is the *page* — a shrunken mess of site chrome, comments and a
-     * postage-stamp video. The page's own fullscreen API is not an option here:
-     * `requestFullscreen()` needs a user gesture and there is none to hand when
-     * the user is walking away from the app. Pinning the player with inline
-     * `!important` styles gets the same result and is undone by [PIP_FIT_OFF].
+     * Activity-level Picture-in-Picture normally shrinks the entire browser
+     * page. Responsive sites can move their player outside that tiny viewport,
+     * leaving Android with a white floating window. The page fullscreen API
+     * cannot be requested here because it requires a user gesture, so a
+     * temporary CSS class pins the live video surface in place instead.
      */
+    private fun pipFitScript(height: String) = """
+    (function () {
+      var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
+      if (!videos.length) return 'no-video';
+
+      var video = videos.filter(function (v) {
+        return !v.paused && !v.ended && v.readyState > 1;
+      }).sort(function (a, b) {
+        var ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+        return (br.width * br.height) - (ar.width * ar.height);
+      })[0] || videos[0];
+
+      var old = window.__nslPipVideo;
+      if (old && old !== video) old.classList.remove('__nsl-pip-video');
+      window.__nslPipVideo = video;
+
+      var canvas = document.getElementById('__nsl_pip_canvas');
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.id = '__nsl_pip_canvas';
+        (document.body || document.documentElement).appendChild(canvas);
+      }
+
+      var style = document.getElementById('__nsl_pip_fit');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = '__nsl_pip_fit';
+        (document.head || document.documentElement).appendChild(style);
+      }
+      style.textContent =
+        'html.__nsl-pip-root,body.__nsl-pip-root{' +
+          'margin:0!important;padding:0!important;overflow:hidden!important;' +
+          'background:#000!important;width:100%!important;height:100%!important}' +
+        '.__nsl-pip-ancestor{' +
+          'transform:none!important;overflow:visible!important;clip:auto!important;' +
+          'clip-path:none!important;opacity:1!important;visibility:visible!important}' +
+        'video.__nsl-pip-video{' +
+          'display:block!important;visibility:visible!important;opacity:0!important;' +
+          'position:fixed!important;left:0!important;top:0!important;' +
+          'margin:0!important;padding:0!important;width:100vw!important;' +
+          'height:$height!important;max-width:none!important;max-height:none!important;' +
+          'object-fit:contain!important;background:#000!important;' +
+          'transform:none!important;z-index:2147483646!important}' +
+        'canvas#__nsl_pip_canvas{' +
+          'display:block!important;visibility:visible!important;opacity:1!important;' +
+          'position:fixed!important;left:0!important;top:0!important;' +
+          'margin:0!important;padding:0!important;width:100vw!important;' +
+          'height:$height!important;background:#000!important;' +
+          'transform:none!important;z-index:2147483647!important}';
+
+      document.documentElement.classList.add('__nsl-pip-root');
+      if (document.body) document.body.classList.add('__nsl-pip-root');
+      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
+        node.classList.remove('__nsl-pip-ancestor');
+      });
+      for (var parent = video.parentElement;
+           parent && parent !== document.body && parent !== document.documentElement;
+           parent = parent.parentElement) {
+        parent.classList.add('__nsl-pip-ancestor');
+      }
+      video.classList.add('__nsl-pip-video');
+      try { video.setAttribute('playsinline', ''); } catch (e) {}
+
+      if (window.__nslPipRaf) cancelAnimationFrame(window.__nslPipRaf);
+      var draw = function () {
+        if (!canvas.isConnected || !video.isConnected) return;
+        var rect = canvas.getBoundingClientRect();
+        var scale = window.devicePixelRatio || 1;
+        var width = Math.max(1, Math.round(rect.width * scale));
+        var height = Math.max(1, Math.round(rect.height * scale));
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+        var ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, width, height);
+          if (video.videoWidth > 0 && video.videoHeight > 0) {
+            var fit = Math.min(width / video.videoWidth, height / video.videoHeight);
+            var dw = video.videoWidth * fit, dh = video.videoHeight * fit;
+            try { ctx.drawImage(video, (width - dw) / 2, (height - dh) / 2, dw, dh); } catch (e) {}
+          }
+        }
+        window.__nslPipRaf = requestAnimationFrame(draw);
+      };
+      draw();
+      return 'video-ready';
+    })();
+    """.trimIndent()
+
+    /**
+     * Before the activity shrinks, make the video an exact 16:9 rectangle at
+     * the top of the WebView. Android receives the same rectangle as its
+     * source hint, avoiding a crop of the full portrait browser surface.
+     */
+    val PIP_FIT_PREPARE = pipFitScript("56.25vw")
+
+    /** Once the PiP window exists, the video can occupy all of that window. */
+    val PIP_FIT_ON = pipFitScript("100vh")
+
+    /** Restores normal page layout after PiP closes or entry fails. */
+    val PIP_FIT_OFF = """
+    (function () {
+      var video = window.__nslPipVideo;
+      if (video) video.classList.remove('__nsl-pip-video');
+      if (window.__nslPipRaf) cancelAnimationFrame(window.__nslPipRaf);
+      window.__nslPipRaf = null;
+      var canvas = document.getElementById('__nsl_pip_canvas');
+      if (canvas) canvas.remove();
+      document.querySelectorAll('.__nsl-pip-ancestor').forEach(function (node) {
+        node.classList.remove('__nsl-pip-ancestor');
+      });
+      document.documentElement.classList.remove('__nsl-pip-root');
+      if (document.body) document.body.classList.remove('__nsl-pip-root');
+      var style = document.getElementById('__nsl_pip_fit');
+      if (style) style.remove();
+      window.__nslPipVideo = null;
+      return 'restored';
+    })();
+    """.trimIndent()
+
     /**
      * Hides ad slots that survive network blocking (they are same-origin markup)
      * and skips YouTube's in-player ads, which are served from the same host as

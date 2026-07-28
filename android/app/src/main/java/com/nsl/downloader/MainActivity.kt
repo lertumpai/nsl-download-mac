@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Set while a page is showing a fullscreen <video>. */
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private var pictureInPictureEntryPending = false
 
     private val notifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -193,18 +194,32 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         if (!prefs.pictureInPictureEnabled) return
         if (isInPictureInPictureMode) return
+        if (pictureInPictureEntryPending) return
         if (!isBrowserVisible() || !browserFragment.hasPlayingMedia()) return
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return
 
-        // Order matters: the fragment pins media visibility *before* the window
-        // is handed over, otherwise Chromium pauses the video mid-transition.
-        browserFragment.onEnteringPictureInPicture()
-        runCatching {
-            enterPictureInPictureMode(
-                PictureInPictureParams.Builder()
-                    .setAspectRatio(Rational(16, 9))
-                    .build()
-            )
+        pictureInPictureEntryPending = true
+        // The fragment first pins the playing <video> to its viewport and waits
+        // for Chromium to draw it. Entering PiP before that draw is what lets a
+        // responsive page resize to an empty white area.
+        browserFragment.prepareForPictureInPicture {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                isFinishing || isDestroyed || isInPictureInPictureMode
+            ) {
+                pictureInPictureEntryPending = false
+                return@prepareForPictureInPicture
+            }
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(16, 9))
+                .apply {
+                    browserFragment.pictureInPictureSourceRect()?.let {
+                        setSourceRectHint(it)
+                    }
+                }
+                .build()
+            val entered = runCatching { enterPictureInPictureMode(params) }.getOrDefault(false)
+            pictureInPictureEntryPending = false
+            if (!entered) browserFragment.onPictureInPictureEntryFailed()
         }
     }
 
@@ -213,6 +228,7 @@ class MainActivity : AppCompatActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pictureInPictureEntryPending = false
         // In a PiP window there is only room for the video itself.
         // The fragments get their own callback dispatched by FragmentActivity.
         binding.footer.visibility = if (isInPictureInPictureMode) View.GONE else View.VISIBLE
