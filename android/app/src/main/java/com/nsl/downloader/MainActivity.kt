@@ -18,10 +18,15 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.nsl.downloader.browser.BrowserFragment
 import com.nsl.downloader.databinding.ActivityMainBinding
 import com.nsl.downloader.library.LibraryFragment
 import com.nsl.downloader.util.Prefs
+import com.nsl.downloader.util.applyDownloadSettings
+import com.nsl.downloader.util.hideDownloadsFromGallery
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
@@ -57,6 +62,7 @@ class MainActivity : AppCompatActivity() {
 
         requestNotifPermission()
         requestLegacyStoragePermission()
+        hideExistingFromGallery()
 
         val restoredBrowser = supportFragmentManager.findFragmentByTag(TAG_BROWSER)
         val restoredLibrary = supportFragmentManager.findFragmentByTag(TAG_LIBRARY)
@@ -301,6 +307,17 @@ class MainActivity : AppCompatActivity() {
             this, Manifest.permission.WRITE_EXTERNAL_STORAGE
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }
+
+    /**
+     * Downloads live in a folder marked `.nomedia` so Gallery apps skip them.
+     * Files published by older versions of the app were indexed as videos
+     * before that marker existed; this retro-fits them, once per download root.
+     */
+    private fun hideExistingFromGallery() {
+        prefs.applyDownloadSettings()
+        val app = applicationContext
+        lifecycleScope.launch(Dispatchers.IO) { prefs.hideDownloadsFromGallery(app) }
     }
 
     /**

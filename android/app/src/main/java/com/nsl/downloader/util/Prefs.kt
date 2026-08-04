@@ -80,6 +80,15 @@ class Prefs(context: Context) {
             MediaStorage.root = clean
         }
 
+    /**
+     * The download root whose existing files were already marked hidden from
+     * Gallery apps. Anything else (a fresh install, or a renamed root) means
+     * [MediaStorage.hideExistingDownloads] still has work to do.
+     */
+    var galleryHiddenRoot: String?
+        get() = sp.getString(KEY_GALLERY_HIDDEN_ROOT, null)
+        set(value) = sp.edit().putString(KEY_GALLERY_HIDDEN_ROOT, value).apply()
+
     private companion object {
         const val KEY_AD_BLOCK = "ad_block"
         const val KEY_BACKGROUND_PLAYBACK = "background_playback"
@@ -89,6 +98,7 @@ class Prefs(context: Context) {
         const val KEY_MAX_CONCURRENT = "max_concurrent"
         const val KEY_SPEED_LIMIT = "speed_limit"
         const val KEY_DOWNLOAD_FOLDER = "download_folder"
+        const val KEY_GALLERY_HIDDEN_ROOT = "gallery_hidden_root"
         const val DEFAULT_MAX_CONCURRENT = 3
     }
 }
@@ -101,4 +111,16 @@ class Prefs(context: Context) {
 fun Prefs.applyDownloadSettings() {
     MediaStorage.root = downloadFolderName
     RateLimiter.bytesPerSecond = speedLimitBytesPerSecond
+}
+
+/**
+ * Runs once per download root: marks the download folder as non-media and
+ * rescans what is already in it, so downloads made before this app version
+ * disappear from Gallery apps too. Blocking I/O — never call on the main thread.
+ */
+fun Prefs.hideDownloadsFromGallery(context: Context) {
+    val root = downloadFolderName
+    if (galleryHiddenRoot == root) return
+    MediaStorage.hideExistingDownloads(context)
+    galleryHiddenRoot = root
 }

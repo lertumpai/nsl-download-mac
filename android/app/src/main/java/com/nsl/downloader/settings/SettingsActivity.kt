@@ -125,7 +125,10 @@ class SettingsActivity : AppCompatActivity() {
             .setPositiveButton(android.R.string.ok) { _, _ ->
                 prefs.downloadFolderName = input.text.toString()
                 prefs.applyDownloadSettings()
-                MediaStorage.ensureFolder(null)
+                // MediaStore work: off the main thread, and nothing on screen
+                // depends on it finishing.
+                val app = applicationContext
+                Thread { MediaStorage.ensureFolder(app, null) }.start()
                 render()
             }
             .setNeutralButton(R.string.settings_folder_reset) { _, _ ->

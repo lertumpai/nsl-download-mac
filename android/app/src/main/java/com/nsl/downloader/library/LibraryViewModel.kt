@@ -67,7 +67,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
             val id = folderDao.insert(FolderEntity(name = trimmed))
-            MediaStorage.ensureFolder(trimmed)
+            withIo { MediaStorage.ensureFolder(getApplication(), trimmed) }
             selectedFolderId.value = id
             onResult(true)
         }
@@ -99,8 +99,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun moveVideo(video: VideoEntity, targetFolderId: Long?) {
         viewModelScope.launch {
             val targetName = targetFolderId?.let { folderDao.getById(it)?.name }
-            if (targetFolderId != null) MediaStorage.ensureFolder(targetName)
             val moved = withIo {
+                if (targetFolderId != null) MediaStorage.ensureFolder(getApplication(), targetName)
                 MediaStorage.move(
                     getApplication(), video.localPath, displayNameOf(video),
                     video.mimeType, targetName
