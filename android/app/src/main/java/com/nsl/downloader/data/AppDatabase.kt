@@ -8,7 +8,7 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [VideoEntity::class, FolderEntity::class], version = 3, exportSchema = false)
+@Database(entities = [VideoEntity::class, FolderEntity::class], version = 4, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun videoDao(): VideoDao
@@ -39,13 +39,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Keeps the download request on the row, so a download that failed can
+         * be resumed later without whatever queued it still being alive.
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                listOf(
+                    "req_kind TEXT NOT NULL DEFAULT 'GENERIC'",
+                    "req_headers TEXT NOT NULL DEFAULT ''",
+                    "req_ytFormat TEXT NOT NULL DEFAULT 'MP4'",
+                    "req_ytHeight INTEGER NOT NULL DEFAULT 0",
+                    "req_mp3Bitrate INTEGER NOT NULL DEFAULT 192",
+                    "req_userAgent TEXT NOT NULL DEFAULT ''",
+                    "req_folderName TEXT"
+                ).forEach { database.execSQL("ALTER TABLE videos ADD COLUMN $it") }
+                // Rows from before this column existed only ever recorded the
+                // page they came from, which is not enough to fetch them again
+                // — a YouTube watch URL downloaded as a plain file is a saved
+                // web page, not a video. Blanking the kind marks them as not
+                // resumable; see [DownloadRequest.isUsable].
+                database.execSQL("UPDATE videos SET req_kind = ''")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "nsl_downloader.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .build().also { INSTANCE = it }
             }
     }
 }

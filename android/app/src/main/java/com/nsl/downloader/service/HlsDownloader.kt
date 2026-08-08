@@ -8,6 +8,8 @@ import kotlinx.coroutines.coroutineScope
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.URI
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -84,6 +86,11 @@ class HlsDownloader(private val client: OkHttpClient) {
      * hide per-segment latency, then written to disk **in playlist order** so the result
      * is a valid contiguous .ts. Memory is bounded to one batch of segments.
      *
+     * A failed run leaves its segments in place and a [ResumeLog] record beside
+     * them, so retrying continues from the next segment rather than re-fetching
+     * hundreds of them. The record is discarded by the caller once the bytes are
+     * no longer wanted; see [DownloadPartials].
+     *
      * @return true on success. onProgress reports (percent 0..100, total bytes written).
      */
     suspend fun download(
@@ -101,11 +108,15 @@ class HlsDownloader(private val client: OkHttpClient) {
             ?: return@coroutineScope false
         if (segments.isEmpty()) return@coroutineScope false
 
-        var written = 0L
-        var done = 0
-        output.outputStream().buffered(BUFFER_SIZE).use { out ->
+        val resumed = resume(output, segments.size)
+        var written = resumed.bytes
+        var done = resumed.segments
+        if (done >= segments.size) return@coroutineScope output.length() > 0
+
+        onProgress(done * 100 / segments.size, written)
+        FileOutputStream(output, done > 0).buffered(BUFFER_SIZE).use { out ->
             // Process in batches so at most PARALLELISM segments are in flight / in memory.
-            for (batch in segments.chunked(PARALLELISM)) {
+            for (batch in segments.drop(done).chunked(PARALLELISM)) {
                 val fetched = batch.map { seg ->
                     async(Dispatchers.IO) {
                         val data = fetchSegment(seg.url, headers) ?: return@async null
@@ -120,9 +131,47 @@ class HlsDownloader(private val client: OkHttpClient) {
                     done++
                     onProgress(done * 100 / segments.size, written)
                 }
+                // One record per batch, not per segment: the buffer has to be
+                // pushed to the file before the count can claim those bytes.
+                out.flush()
+                ResumeLog.write(output, ResumeState.Segments(done, written, segments.size))
             }
         }
         output.length() > 0
+    }
+
+    /** Segments a previous attempt already appended, and where they end. */
+    private data class Resumed(val segments: Int, val bytes: Long)
+
+    /**
+     * How much of [output] survives from an earlier attempt at a playlist of
+     * [playlistSize] segments.
+     *
+     * A playlist that changed length is a different stream (or a live one), so
+     * nothing can be assumed about the bytes already written. Otherwise the file
+     * is cut back to the last recorded segment boundary — anything past it was
+     * flushed after the record and cannot be placed in the sequence.
+     */
+    private fun resume(output: File, playlistSize: Int): Resumed {
+        val state = ResumeLog.read(output) as? ResumeState.Segments
+        val usable = state != null &&
+            state.playlistSize == playlistSize &&
+            state.segments in 1..playlistSize &&
+            output.length() >= state.bytes
+        if (!usable) {
+            output.delete()
+            ResumeLog.clear(output)
+            return Resumed(0, 0L)
+        }
+        if (output.length() > state!!.bytes) {
+            runCatching { RandomAccessFile(output, "rw").use { it.setLength(state.bytes) } }
+                .onFailure {
+                    output.delete()
+                    ResumeLog.clear(output)
+                    return Resumed(0, 0L)
+                }
+        }
+        return Resumed(state.segments, state.bytes)
     }
 
     private fun isMaster(url: String, headers: Map<String, String>): Boolean {

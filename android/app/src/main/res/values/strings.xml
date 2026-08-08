@@ -125,6 +125,15 @@
     <string name="notif_playlist_done_ok">“%1$s” • %2$d videos downloaded</string>
     <string name="notif_playlist_done_failed">“%1$s” • %2$d downloaded, %3$d failed</string>
 
+    <!-- Failed downloads / resuming -->
+    <string name="notif_download_done">Download complete</string>
+    <string name="notif_download_failed">Download failed</string>
+    <string name="resume_download">Resume</string>
+    <string name="library_failed">Failed</string>
+    <string name="library_failed_tap_resume">Failed • tap to resume</string>
+    <string name="library_resume_title">Resume download</string>
+    <string name="library_resume_message">Continue downloading “%1$s” from where it stopped?</string>
+
     <!-- Removing / cancelling -->
     <string name="cancel_download">Cancel download</string>
     <string name="cancel_download_message">Stop downloading “%1$s”? The partial file is discarded.</string>

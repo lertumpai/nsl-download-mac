@@ -37,7 +37,8 @@ class LibraryFragment : Fragment() {
     private val adapter = VideoAdapter(
         onClick = { openPlayer(it) },
         onDelete = { confirmDeleteSingle(it) },
-        onLongClick = { showItemActions(it) }
+        onLongClick = { showItemActions(it) },
+        onResume = { confirmResume(it) }
     )
 
     /** Guards against the chip listener firing while we rebuild the row. */
@@ -205,12 +206,21 @@ class LibraryFragment : Fragment() {
     }
 
     private fun showItemActions(video: VideoEntity) {
-        val actions = listOf<Pair<String, () -> Unit>>(
-            getString(R.string.library_play) to { openPlayer(video) },
-            getString(R.string.library_move_to) to { promptMove(video) },
-            getString(R.string.library_share) to { shareVideo(video) },
-            getString(R.string.remove) to { confirmDeleteSingle(video) }
-        )
+        val actions = if (video.status == DownloadStatus.FAILED) {
+            buildList<Pair<String, () -> Unit>> {
+                if (video.request.isUsable) {
+                    add(getString(R.string.resume_download) to { confirmResume(video) })
+                }
+                add(getString(R.string.remove) to { confirmDeleteSingle(video) })
+            }
+        } else {
+            listOf<Pair<String, () -> Unit>>(
+                getString(R.string.library_play) to { openPlayer(video) },
+                getString(R.string.library_move_to) to { promptMove(video) },
+                getString(R.string.library_share) to { shareVideo(video) },
+                getString(R.string.remove) to { confirmDeleteSingle(video) }
+            )
+        }
         MaterialAlertDialogBuilder(requireContext())
             .setTitle(video.title)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
@@ -276,6 +286,20 @@ class LibraryFragment : Fragment() {
                 getString(R.string.library_share)
             )
         )
+    }
+
+    /**
+     * The failed row's own action. Asking first because the transfer can be a
+     * big one and the user may have wanted it stopped — but the partial file is
+     * still there, so agreeing continues it rather than starting again.
+     */
+    private fun confirmResume(video: VideoEntity) {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.library_resume_title)
+            .setMessage(getString(R.string.library_resume_message, video.title))
+            .setPositiveButton(R.string.resume_download) { _, _ -> viewModel.resumeVideo(video) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**

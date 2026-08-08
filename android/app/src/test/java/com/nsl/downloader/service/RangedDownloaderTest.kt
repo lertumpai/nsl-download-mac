@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -41,6 +42,7 @@ class RangedDownloaderTest {
     fun tearDown() {
         if (this::server.isInitialized) server.close()
         output.delete()
+        ResumeLog.sidecarOf(output).delete()
     }
 
     private fun downloader() = RangedDownloader(OkHttpClient())
@@ -129,6 +131,70 @@ class RangedDownloaderTest {
     }
 
     /**
+     * The point of the whole exercise: an origin that dies part way through
+     * leaves usable chunks behind, and the next attempt fetches only the rest.
+     */
+    @Test
+    fun `a ranged transfer resumes from the chunks already on disk`() {
+        // 21 MB is 11 chunks; the origin serves the probe and a few of them.
+        server = FakeRangeServer(payloadOf(21 * 1024 * 1024))
+        server.failAfter(5)
+        assertFalse("the transfer was supposed to fail", download())
+
+        val recorded = ResumeLog.read(output)
+        assertTrue("expected chunks to be recorded, got $recorded", recorded is ResumeState.Ranged)
+
+        server.serveEverything()
+        val before = server.rangeRequests.get()
+        assertTrue(download())
+        assertArrayEquals(server.payload, output.readBytes())
+        assertTrue(
+            "the second pass re-fetched the whole file",
+            server.rangeRequests.get() - before < 11
+        )
+    }
+
+    /**
+     * A retry of a multi-part job asks again for parts that already landed —
+     * a YouTube mux that failed with both tracks downloaded, say. Those must
+     * cost nothing.
+     */
+    @Test
+    fun `a finished file is not fetched again`() {
+        server = FakeRangeServer(payloadOf(9 * 1024 * 1024))
+        assertTrue(download())
+        val requests = server.rangeRequests.get() + server.wholeRequests.get()
+
+        assertTrue(download())
+        assertEquals(requests, server.rangeRequests.get() + server.wholeRequests.get())
+        assertArrayEquals(server.payload, output.readBytes())
+    }
+
+    /** The same, for a file small enough to skip the split entirely. */
+    @Test
+    fun `a single stream resumes from the bytes already on disk`() {
+        // Under the parallel threshold, so this is the sequential path, and
+        // every response is cut in half — five attempts still fall short.
+        server = FakeRangeServer(
+            payloadOf(3 * 1024 * 1024),
+            truncateFirst = 99,
+            truncateWholeFirst = 99
+        )
+        assertFalse("the transfer was supposed to fail", download())
+
+        val recorded = ResumeLog.read(output) as? ResumeState.Sequential
+        assertTrue("expected recorded bytes, got $recorded", (recorded?.bytes ?: 0L) > 0L)
+
+        server.serveEverything()
+        assertTrue(download())
+        assertArrayEquals(server.payload, output.readBytes())
+        assertTrue(
+            "the second pass restarted from the beginning",
+            server.lastRangeStart.get() > 0
+        )
+    }
+
+    /**
      * The transfer loop blocks in a socket read, which coroutine cancellation
      * cannot interrupt on its own — the download has to stop anyway, and fast,
      * or the Library's delete leaves the service running.
@@ -178,10 +244,26 @@ class RangedDownloaderTest {
         private val socket = ServerSocket(0)
         private val truncationsLeft = AtomicInteger(truncateFirst)
         private val wholeTruncationsLeft = AtomicInteger(truncateWholeFirst)
+        /** Responses left before the origin starts hanging up on every request. */
+        private val healthyResponsesLeft = AtomicInteger(Int.MAX_VALUE)
         val rangeRequests = AtomicInteger(0)
         val queryRangeRequests = AtomicInteger(0)
         val largestQueryRange = AtomicInteger(0)
         val wholeRequests = AtomicInteger(0)
+        /** Where the most recent range request asked to start. */
+        val lastRangeStart = AtomicInteger(0)
+
+        /** Serve [count] more requests, then drop every connection unanswered. */
+        fun failAfter(count: Int) {
+            healthyResponsesLeft.set(count)
+        }
+
+        /** Recover: answer everything in full from here on. */
+        fun serveEverything() {
+            healthyResponsesLeft.set(Int.MAX_VALUE)
+            truncationsLeft.set(0)
+            wholeTruncationsLeft.set(0)
+        }
 
         val url: String get() = "http://127.0.0.1:${socket.localPort}/video.mp4"
         val googleVideoUrl: String
@@ -209,6 +291,8 @@ class RangedDownloaderTest {
                     range = line.substringAfter(':').trim()
                 }
             }
+
+            if (healthyResponsesLeft.getAndDecrement() <= 0) return  // socket closed, no reply
 
             val out = client.getOutputStream()
             val queryRange = target
@@ -239,6 +323,7 @@ class RangedDownloaderTest {
 
             rangeRequests.incrementAndGet()
             val start = spec.substringBefore('-').toInt()
+            lastRangeStart.set(start)
             val end = spec.substringAfter('-').toIntOrNull() ?: (payload.size - 1)
             val length = end - start + 1
             if (queryRange != null) {

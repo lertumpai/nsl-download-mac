@@ -33,6 +33,12 @@ import java.util.concurrent.atomic.AtomicLong
  * Cancellation is honoured promptly: a blocking socket read cannot be
  * interrupted by coroutine cancellation alone, so each call is tied to the
  * job and the socket is cancelled with it.
+ *
+ * Progress survives the call. What has already landed is recorded in a
+ * [ResumeLog] sidecar as it lands, so a download that failed — or a whole app
+ * process that died — picks up from there instead of starting the file again.
+ * The record is only ever discarded by the caller, once it no longer wants the
+ * bytes; see [DownloadPartials].
  */
 class RangedDownloader(base: OkHttpClient) {
 
@@ -52,6 +58,14 @@ class RangedDownloader(base: OkHttpClient) {
         private const val MAX_ATTEMPTS = 3
         private const val MAX_WHOLE_ATTEMPTS = 5
         private const val RETRY_DELAY_MS = 300L
+
+        /**
+         * How much a single-stream transfer may re-fetch after an interruption.
+         * The ranged path records every chunk as it completes, but a sequential
+         * one would have to write the sidecar per buffer to match that, so it
+         * settles for checkpoints.
+         */
+        private const val RESUME_RECORD_BYTES = 4L shl 20
 
         /** Under this the connection setup costs more than the split saves. */
         private const val MIN_PARALLEL_BYTES = 4L shl 20
@@ -95,6 +109,14 @@ class RangedDownloader(base: OkHttpClient) {
         headers: Map<String, String>,
         onProgress: (Int, Long) -> Unit
     ): Boolean {
+        // A retry of a multi-part job (say a YouTube mux that failed after both
+        // tracks landed) asks for files that are already whole. Answering that
+        // from the sidecar keeps the retry off the network entirely.
+        alreadyComplete(output)?.let { size ->
+            onProgress(100, size)
+            return true
+        }
+
         val probe = probe(url, headers)
         val parallelThreshold = when (probe?.mode) {
             RangeMode.QUERY -> MIN_GOOGLEVIDEO_PARALLEL_BYTES
@@ -109,8 +131,39 @@ class RangedDownloader(base: OkHttpClient) {
             // a single shaped response — so the ranged path retries hard before
             // giving up on it (see [downloadRanged]).
             currentCoroutineContext().ensureActive()
+
+            // The fallback fills the file front to back, so it has to start
+            // from nothing — scattered ranges are not a prefix it can append
+            // to. Taking it would throw away everything the ranged pass did
+            // get. Only worth that when it got nothing: a server that answered
+            // real ranges has not refused the method, and the caller's next
+            // attempt resumes from those bytes instead of re-fetching them.
+            if (rangedBytesOnDisk(output) > 0L) return false
         }
-        return downloadWhole(url, output, headers, onProgress)
+        return downloadWhole(url, output, headers, probe?.length ?: -1L, onProgress)
+    }
+
+    /** Bytes a previous ranged pass left in [output] and can still account for. */
+    private fun rangedBytesOnDisk(output: File): Long {
+        val state = ResumeLog.read(output) as? ResumeState.Ranged ?: return 0L
+        val map = ChunkMap(output, state.total, state.chunkSize)
+        return if (map.restore(state)) map.bytesDone() else 0L
+    }
+
+    /** The file's size if a previous attempt already finished it, else null. */
+    private fun alreadyComplete(output: File): Long? {
+        if (!output.exists()) return null
+        val length = output.length()
+        return when (val state = ResumeLog.read(output)) {
+            is ResumeState.Ranged -> {
+                val map = ChunkMap(output, state.total, state.chunkSize)
+                if (state.total == length && map.restore(state) && map.isFull()) length else null
+            }
+            is ResumeState.Sequential ->
+                if (state.total > 0 && state.total == length && state.bytes == length) length
+                else null
+            else -> null
+        }
     }
 
     /** A one-byte GET: reveals the total size and how ranges may be asked for. */
@@ -153,8 +206,64 @@ class RangedDownloader(base: OkHttpClient) {
     private fun supportsRangeParam(url: String): Boolean =
         runCatching { url.toHttpUrl().host.endsWith("googlevideo.com") }.getOrDefault(false)
 
-    private class Chunk(val start: Long, val end: Long) {
+    private class Chunk(val index: Int, val start: Long, val end: Long) {
         var attempts = 0
+    }
+
+    /**
+     * Which chunks of [output] are already on disk, kept in step with the
+     * sidecar so the answer outlives the process.
+     *
+     * Workers complete chunks on several threads at once, so both the bitmap
+     * and the write behind it are serialised. The file is a kilobyte at most
+     * and a chunk takes long enough to fetch that rewriting it per completion
+     * costs nothing measurable.
+     */
+    private class ChunkMap(
+        private val output: File,
+        private val total: Long,
+        private val chunkSize: Long
+    ) {
+        val count: Int =
+            if (chunkSize <= 0L) 0 else ((total + chunkSize - 1) / chunkSize).toInt()
+        private val bits = ByteArray((count + 7) / 8)
+
+        /**
+         * Adopts [state] when it describes this same split of this same file,
+         * and reports whether it did. A mismatch — the server now gives a
+         * different length, or the last attempt used the other range mode and
+         * so a different chunk size — means the bytes on disk cannot be placed,
+         * so the transfer starts over.
+         */
+        fun restore(state: ResumeState.Ranged?): Boolean {
+            val usable = state != null &&
+                state.total == total &&
+                state.chunkSize == chunkSize &&
+                state.done.size == bits.size &&
+                output.length() == total
+            if (usable) state!!.done.copyInto(bits)
+            return usable
+        }
+
+        @Synchronized
+        fun isDone(index: Int): Boolean =
+            bits[index / 8].toInt() and (1 shl (index % 8)) != 0
+
+        @Synchronized
+        fun markDone(index: Int) {
+            bits[index / 8] = (bits[index / 8].toInt() or (1 shl (index % 8))).toByte()
+            ResumeLog.write(output, ResumeState.Ranged(total, chunkSize, bits.copyOf()))
+        }
+
+        @Synchronized
+        fun isFull(): Boolean = (0 until count).all { isDone(it) }
+
+        /** Bytes already on disk — the last chunk is usually a short one. */
+        @Synchronized
+        fun bytesDone(): Long = (0 until count).sumOf { index ->
+            if (!isDone(index)) 0L
+            else minOf(chunkSize, total - index * chunkSize)
+        }
     }
 
     /**
@@ -165,7 +274,8 @@ class RangedDownloader(base: OkHttpClient) {
      * A chunk that fails goes back in the queue instead of sinking the whole
      * pass: giving up here means restarting as one plain, CDN-shaped response,
      * which is what a download collapsing to a few KB/s after a fast start
-     * actually looks like.
+     * actually looks like. Chunks a previous attempt finished are not queued
+     * at all.
      */
     private suspend fun downloadRanged(
         url: String,
@@ -175,6 +285,15 @@ class RangedDownloader(base: OkHttpClient) {
         mode: RangeMode,
         onProgress: (Int, Long) -> Unit
     ): Boolean = coroutineScope {
+        val chunkSize = when (mode) {
+            RangeMode.QUERY -> GOOGLEVIDEO_CHUNK_SIZE
+            RangeMode.HEADER -> CHUNK_SIZE
+        }
+        // Only meaningful for a file that already holds the right bytes at the
+        // right offsets, so read the record before setLength touches anything.
+        val map = ChunkMap(output, total, chunkSize)
+        map.restore(ResumeLog.read(output) as? ResumeState.Ranged)
+
         try {
             RandomAccessFile(output, "rw").use { it.setLength(total) }
         } catch (e: IOException) {
@@ -182,17 +301,17 @@ class RangedDownloader(base: OkHttpClient) {
         }
 
         val queue = java.util.concurrent.ConcurrentLinkedQueue<Chunk>()
-        val chunkSize = when (mode) {
-            RangeMode.QUERY -> GOOGLEVIDEO_CHUNK_SIZE
-            RangeMode.HEADER -> CHUNK_SIZE
-        }
         var offset = 0L
+        var index = 0
         while (offset < total) {
-            queue.add(Chunk(offset, minOf(offset + chunkSize, total) - 1))
+            if (!map.isDone(index)) {
+                queue.add(Chunk(index, offset, minOf(offset + chunkSize, total) - 1))
+            }
             offset += chunkSize
+            index++
         }
 
-        val done = AtomicLong(0)
+        val done = AtomicLong(map.bytesDone())
         val exhausted = java.util.concurrent.atomic.AtomicBoolean(false)
         val reportLock = Any()
         // Workers report from several threads and the callback downstream keeps
@@ -201,6 +320,7 @@ class RangedDownloader(base: OkHttpClient) {
             val soFar = done.get()
             synchronized(reportLock) { onProgress((soFar * 100 / total).toInt(), soFar) }
         }
+        report()
 
         (0 until CONNECTIONS).map {
             async(Dispatchers.IO) {
@@ -214,7 +334,10 @@ class RangedDownloader(base: OkHttpClient) {
                             done.addAndGet(read.toLong())
                             report()
                         }
-                        if (ok) continue
+                        if (ok) {
+                            map.markDone(chunk.index)
+                            continue
+                        }
 
                         // Roll the partial back out of the progress before the
                         // retry re-reads the same bytes.
@@ -231,7 +354,7 @@ class RangedDownloader(base: OkHttpClient) {
             }
         }.awaitAll()
 
-        !exhausted.get() && queue.isEmpty() && done.get() >= total
+        !exhausted.get() && queue.isEmpty() && map.isFull()
     }
 
     /**
@@ -303,11 +426,17 @@ class RangedDownloader(base: OkHttpClient) {
         url: String,
         output: File,
         headers: Map<String, String>,
+        knownTotal: Long,
         onProgress: (Int, Long) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
-        var downloaded = 0L
-        var total = -1L
+        var total = knownTotal
+        var downloaded = resumeSequential(output, knownTotal)
+        var lastRecorded = downloaded
         var attempt = 0
+
+        if (downloaded > 0L) onProgress((downloaded * 100 / total).toInt(), downloaded)
+        // Asking for a range that starts at the end would only earn a 416.
+        if (total > 0L && downloaded >= total) return@withContext true
 
         while (attempt < MAX_WHOLE_ATTEMPTS) {
             currentCoroutineContext().ensureActive()
@@ -322,7 +451,9 @@ class RangedDownloader(base: OkHttpClient) {
                     // restart cleanly instead of appending a second copy.
                     if (resumeAt != null && response.code != 206) {
                         downloaded = 0L
+                        lastRecorded = 0L
                         output.delete()
+                        ResumeLog.clear(output)
                     }
 
                     val responseTotal = response.header("Content-Range")
@@ -333,25 +464,48 @@ class RangedDownloader(base: OkHttpClient) {
                         ?: -1L
                     if (responseTotal > 0L) total = responseTotal
 
-                    FileOutputStream(output, downloaded > 0L).buffered(BUFFER_SIZE).use { out ->
-                        body.byteStream().use { input ->
-                            val buffer = ByteArray(BUFFER_SIZE)
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read <= 0) break
-                                RateLimiter.acquire(read)
-                                out.write(buffer, 0, read)
-                                downloaded += read
-                                // Unknown total (chunked) → indeterminate percent (-1).
-                                onProgress(
-                                    if (total > 0L) {
-                                        (downloaded * 100 / total).coerceAtMost(100).toInt()
-                                    } else {
-                                        -1
-                                    },
-                                    downloaded
-                                )
+                    try {
+                        FileOutputStream(output, downloaded > 0L).buffered(BUFFER_SIZE)
+                            .use { out ->
+                                body.byteStream().use { input ->
+                                    val buffer = ByteArray(BUFFER_SIZE)
+                                    while (true) {
+                                        val read = input.read(buffer)
+                                        if (read <= 0) break
+                                        RateLimiter.acquire(read)
+                                        out.write(buffer, 0, read)
+                                        downloaded += read
+                                        // Unknown total (chunked) → indeterminate percent (-1).
+                                        onProgress(
+                                            if (total > 0L) {
+                                                (downloaded * 100 / total).coerceAtMost(100).toInt()
+                                            } else {
+                                                -1
+                                            },
+                                            downloaded
+                                        )
+                                        if (total > 0L &&
+                                            downloaded - lastRecorded >= RESUME_RECORD_BYTES
+                                        ) {
+                                            // Flush first: the record must never
+                                            // claim bytes still in the buffer.
+                                            out.flush()
+                                            ResumeLog.write(
+                                                output, ResumeState.Sequential(total, downloaded)
+                                            )
+                                            lastRecorded = downloaded
+                                        }
+                                    }
+                                }
                             }
+                    } finally {
+                        // Also on the way out of a failure: a body that stops
+                        // early throws rather than reading EOF, and those bytes
+                        // are the whole point of being able to resume. The
+                        // stream is closed — and so flushed — by now.
+                        if (total > 0L && downloaded > lastRecorded) {
+                            ResumeLog.write(output, ResumeState.Sequential(total, downloaded))
+                            lastRecorded = downloaded
                         }
                     }
                     reachedEof = true
@@ -374,6 +528,36 @@ class RangedDownloader(base: OkHttpClient) {
             }
         }
         false
+    }
+
+    /**
+     * How many bytes of [output] a sequential pass may keep, given the origin
+     * now reports [knownTotal]. Anything not covered by the record is dropped:
+     * a previous attempt can have flushed past its last checkpoint, and those
+     * bytes are unaccounted for, so the append would start at the wrong place.
+     */
+    private fun resumeSequential(output: File, knownTotal: Long): Long {
+        val state = ResumeLog.read(output) as? ResumeState.Sequential
+        val bytes = state?.bytes ?: 0L
+        val usable = state != null &&
+            knownTotal > 0L &&
+            state.total == knownTotal &&
+            bytes in 1..knownTotal &&
+            output.length() >= bytes
+        if (!usable) {
+            output.delete()
+            ResumeLog.clear(output)
+            return 0L
+        }
+        if (output.length() > bytes) {
+            runCatching { RandomAccessFile(output, "rw").use { it.setLength(bytes) } }
+                .onFailure {
+                    output.delete()
+                    ResumeLog.clear(output)
+                    return 0L
+                }
+        }
+        return bytes
     }
 
     private fun buildRequest(

@@ -32,6 +32,18 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE status = :status")
     suspend fun getByStatus(status: DownloadStatus): List<VideoEntity>
 
+    /**
+     * Marks downloads that were still running when the app last went away as
+     * failed, so they show up as something the user can resume. [running] holds
+     * the ids the download service is transferring right now — an app process
+     * that survived its service must not have its live rows retired.
+     */
+    @Query(
+        "UPDATE videos SET status = 'FAILED' " +
+            "WHERE status IN ('DOWNLOADING', 'PENDING') AND id NOT IN (:running)"
+    )
+    suspend fun failInterrupted(running: List<Long>)
+
     /** Used when a folder is deleted: its videos fall back to the library root. */
     @Query("UPDATE videos SET folderId = NULL WHERE folderId = :folderId")
     suspend fun clearFolder(folderId: Long)

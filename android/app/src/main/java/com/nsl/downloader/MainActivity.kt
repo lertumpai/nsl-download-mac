@@ -20,8 +20,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.nsl.downloader.browser.BrowserFragment
+import com.nsl.downloader.data.AppDatabase
 import com.nsl.downloader.databinding.ActivityMainBinding
 import com.nsl.downloader.library.LibraryFragment
+import com.nsl.downloader.service.DownloadPartials
+import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.applyDownloadSettings
 import com.nsl.downloader.util.hideDownloadsFromGallery
@@ -63,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         requestNotifPermission()
         requestLegacyStoragePermission()
         hideExistingFromGallery()
+        reclaimInterruptedDownloads()
 
         val restoredBrowser = supportFragmentManager.findFragmentByTag(TAG_BROWSER)
         val restoredLibrary = supportFragmentManager.findFragmentByTag(TAG_LIBRARY)
@@ -318,6 +322,24 @@ class MainActivity : AppCompatActivity() {
         prefs.applyDownloadSettings()
         val app = applicationContext
         lifecycleScope.launch(Dispatchers.IO) { prefs.hideDownloadsFromGallery(app) }
+    }
+
+    /**
+     * Settles downloads the app was killed in the middle of. Their rows still
+     * read as in progress but nothing is transferring them, so they are marked
+     * failed — which is what offers them back to the user as resumable; the
+     * bytes they got are untouched. Rows the service is genuinely still working
+     * on are left alone, and partials whose row is gone are swept up.
+     */
+    private fun reclaimInterruptedDownloads() {
+        val app = applicationContext
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                val dao = AppDatabase.getInstance(app).videoDao()
+                dao.failInterrupted(DownloadService.runningIds().toList())
+                DownloadPartials.sweep(app, dao.observeAllOnce().map { it.id }.toSet())
+            }
+        }
     }
 
     /**

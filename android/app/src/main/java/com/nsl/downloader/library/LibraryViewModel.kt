@@ -8,6 +8,7 @@ import com.nsl.downloader.data.DownloadProgressBus
 import com.nsl.downloader.data.DownloadStatus
 import com.nsl.downloader.data.FolderEntity
 import com.nsl.downloader.data.VideoEntity
+import com.nsl.downloader.service.DownloadPartials
 import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.util.MediaStorage
 import kotlinx.coroutines.Dispatchers
@@ -110,6 +111,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Picks a failed download back up. The service still has what the failed
+     * attempt fetched, so this continues it instead of starting over.
+     */
+    fun resumeVideo(video: VideoEntity) {
+        if (video.status != DownloadStatus.FAILED || !video.request.isUsable) return
+        DownloadService.retry(getApplication(), video.id)
+    }
+
     /** Remove a single video and ALL its files (video + thumbnail). */
     fun removeVideo(video: VideoEntity) {
         stopIfDownloading(video)
@@ -153,6 +163,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
             video.thumbnailPath?.let { File(it).delete() }
         }
+        // Removing the row is also the user saying they no longer want what a
+        // failed attempt left half-finished.
+        DownloadPartials.discard(getApplication(), video.id)
     }
 
     private fun displayNameOf(video: VideoEntity): String {

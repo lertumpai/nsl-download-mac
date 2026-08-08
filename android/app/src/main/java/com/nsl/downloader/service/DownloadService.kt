@@ -3,6 +3,10 @@ package com.nsl.downloader.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -26,11 +30,13 @@ import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 class DownloadService : Service() {
 
     companion object {
         const val ACTION_DOWNLOAD = "com.nsl.downloader.DOWNLOAD"
+        const val ACTION_RETRY = "com.nsl.downloader.RETRY"
         const val ACTION_CANCEL = "com.nsl.downloader.CANCEL"
         const val ACTION_CANCEL_BATCH = "com.nsl.downloader.CANCEL_BATCH"
         const val EXTRA_VIDEO_ID = "video_id"
@@ -55,8 +61,22 @@ class DownloadService : Service() {
         const val BATCH_DONE_NOTIF_BASE = 40000 // per-playlist complete
         const val MAX_CONCURRENT = 3          // default; Settings can change it
 
+        /**
+         * Transfers of one download before it is called a failure. Each attempt
+         * resumes from what the last one left on disk, so the cost of another
+         * go is only the part that is actually missing.
+         */
+        private const val MAX_JOB_ATTEMPTS = 3
+        private const val JOB_RETRY_DELAY_MS = 2_000L
+
+        /** How long a retry waits for the radio to come back before trying anyway. */
+        private const val NETWORK_WAIT_MS = 45_000L
+
         /** Keeps batch PendingIntent request codes clear of the video-id ones. */
         private const val BATCH_REQUEST_OFFSET = 100_000L
+
+        /** Likewise for the retry action, which shares the shade with cancel. */
+        private const val RETRY_REQUEST_OFFSET = 200_000L
 
         /** Progress is posted at most this often; see the note in [runJob]. */
         private const val PROGRESS_INTERVAL_MS = 300L
@@ -123,6 +143,29 @@ class DownloadService : Service() {
                         putExtra(EXTRA_BATCH_ID, batchId)
                     }
                 )
+            }
+        }
+
+        /** Library rows being transferred right now. */
+        fun runningIds(): Set<Long> = running.keys.toSet()
+
+        /**
+         * Picks a download that failed back up. The row already carries how it
+         * was requested, and whatever the failed attempt managed to fetch is
+         * still on disk, so this continues rather than starts again.
+         */
+        fun retry(context: Context, videoId: Long) {
+            cancelledIds.remove(videoId)
+            runCatching {
+                val intent = Intent(context, DownloadService::class.java).apply {
+                    action = ACTION_RETRY
+                    putExtra(EXTRA_VIDEO_ID, videoId)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
             }
         }
 
@@ -236,7 +279,13 @@ class DownloadService : Service() {
         val mp3Bitrate: Int = 192,
         val userAgent: String = "",
         /** 0 when the download stands alone; see [DownloadService.cancelBatch]. */
-        val batchId: Long = 0L
+        val batchId: Long = 0L,
+        /**
+         * The library row to fill. Null for a new download — one is created —
+         * and set when resuming a row that failed earlier, which is also what
+         * ties the attempt to the partial files already on disk.
+         */
+        val videoId: Long? = null
     )
 
     private val prefs by lazy { com.nsl.downloader.util.Prefs(this) }
@@ -261,13 +310,24 @@ class DownloadService : Service() {
     private val hlsDownloader by lazy { HlsDownloader(client) }
     private val rangedDownloader by lazy { RangedDownloader(client) }
 
-    /** Scratch space; finished files are published to shared storage. */
-    private val workDir by lazy { File(cacheDir, "downloading").also { it.mkdirs() } }
+    /**
+     * Scratch space for the row being filled; finished files are published to
+     * shared storage. Kept per row and outside the cache so a failed attempt
+     * can be resumed — see [DownloadPartials].
+     */
+    private fun workDir(videoId: Long): File = DownloadPartials.forVideo(this, videoId)
 
     // Concurrency: as many downloads as Settings allows run at once; the rest wait.
     private val lock = Any()
     private val pending = ArrayDeque<Task>()
     private var active = 0
+
+    /**
+     * Retries whose row is still being read out of the database. They hold the
+     * service up the same way a queued task does; without that the idle check
+     * would tear it down before the task ever reached [pending].
+     */
+    private var loading = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -275,6 +335,9 @@ class DownloadService : Service() {
         // cap and the destination folder are applied here as well as in the UI.
         prefs.applyDownloadSettings()
         createNotificationChannel()
+        // Partials used to live in the cache, where the system was free to drop
+        // them; nothing there is resumable, so it is only taking up space now.
+        scope.launch { runCatching { File(cacheDir, "downloading").deleteRecursively() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -293,6 +356,13 @@ class DownloadService : Service() {
         if (intent?.action == ACTION_CANCEL_BATCH) {
             intent.getLongExtra(EXTRA_BATCH_ID, 0L).takeIf { it != 0L }?.let { dropBatch(it) }
             stopIfIdle()
+            return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_RETRY) {
+            // Must enter foreground promptly after startForegroundService(),
+            // and the row this needs is behind a database read.
+            startForeground(NOTIF_ID, summaryNotification())
+            enqueueRetry(intent.getLongExtra(EXTRA_VIDEO_ID, -1L))
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_DOWNLOAD) {
@@ -349,6 +419,56 @@ class DownloadService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * Queues a fresh attempt at library row [videoId], rebuilding the original
+     * request from the row itself. A row that is already transferring is left
+     * alone: the user tapping retry on something that just restarted should not
+     * get two writers on the same file.
+     */
+    private fun enqueueRetry(videoId: Long) {
+        if (videoId < 0 || running.containsKey(videoId)) {
+            stopIfIdle()
+            return
+        }
+        synchronized(lock) { loading++ }
+        scope.launch {
+            val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
+            val row = dao.getById(videoId)
+                ?.takeIf { it.status != DownloadStatus.COMPLETED && it.request.isUsable }
+            // Surfacing the row as active straight away — the transfer itself
+            // may sit in the queue behind other downloads for a while.
+            if (row != null) {
+                dao.update(
+                    row.copy(
+                        status = DownloadStatus.DOWNLOADING,
+                        downloadedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            synchronized(lock) {
+                loading--
+                if (row != null) pending.addLast(row.toTask())
+            }
+            pump()
+        }
+    }
+
+    private fun VideoEntity.toTask(): Task = Task(
+        kind = runCatching { Kind.valueOf(request.kind) }.getOrDefault(Kind.GENERIC),
+        url = sourceUrl,
+        title = title,
+        headers = request.headers,
+        folderId = folderId,
+        folderName = request.folderName,
+        ytFormat = runCatching { YtFormat.valueOf(request.ytFormat) }.getOrDefault(YtFormat.MP4),
+        ytHeight = request.ytHeight,
+        mp3Bitrate = request.mp3Bitrate,
+        userAgent = request.userAgent,
+        // A retry stands on its own: the playlist it came from is long finished.
+        batchId = 0L,
+        videoId = id
+    )
+
     /** Launch as many queued downloads as the concurrency limit allows. */
     private fun pump() {
         val toStart = mutableListOf<Task>()
@@ -358,7 +478,7 @@ class DownloadService : Service() {
                 toStart.add(pending.removeFirst())
                 active++
             }
-            idle = active == 0 && pending.isEmpty()
+            idle = active == 0 && pending.isEmpty() && loading == 0
         }
 
         toStart.forEach { task ->
@@ -401,7 +521,7 @@ class DownloadService : Service() {
 
     /** Tears the service down once nothing is left to transfer. */
     private fun stopIfIdle() {
-        val idle = synchronized(lock) { active == 0 && pending.isEmpty() }
+        val idle = synchronized(lock) { active == 0 && pending.isEmpty() && loading == 0 }
         if (idle) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -412,16 +532,26 @@ class DownloadService : Service() {
 
     private suspend fun runJob(task: Task) {
         val dao = AppDatabase.getInstance(this).videoDao()
-        val entity = VideoEntity(
-            title = task.title,
-            sourceUrl = task.url,
-            localPath = "",
-            status = DownloadStatus.DOWNLOADING,
-            folderId = task.folderId,
-            mimeType = if (task.kind == Kind.YOUTUBE && task.ytFormat == YtFormat.MP3)
-                "audio/mpeg" else "video/mp4"
-        )
-        val id = dao.insert(entity)
+        // A retry fills the row it failed on: same id, so it also finds the
+        // partial files that attempt left behind.
+        val existing = task.videoId?.let { dao.getById(it) }
+        val entity = existing?.copy(status = DownloadStatus.DOWNLOADING, localPath = "")
+            ?: VideoEntity(
+                title = task.title,
+                sourceUrl = task.url,
+                localPath = "",
+                status = DownloadStatus.DOWNLOADING,
+                folderId = task.folderId,
+                mimeType = if (task.kind == Kind.YOUTUBE && task.ytFormat == YtFormat.MP3)
+                    "audio/mpeg" else "video/mp4",
+                request = task.toRequest()
+            )
+        val id = if (existing != null) {
+            dao.update(entity)
+            existing.id
+        } else {
+            dao.insert(entity)
+        }
         val nm = getSystemService(NotificationManager::class.java)
         val progressNotifId = PROGRESS_NOTIF_BASE + id.toInt()
 
@@ -437,6 +567,7 @@ class DownloadService : Service() {
             running.remove(id)
             batchOfVideo.remove(id)
             dao.deleteById(id)
+            DownloadPartials.discard(this, id)
             return
         }
 
@@ -461,13 +592,9 @@ class DownloadService : Service() {
             nm.notify(progressNotifId, buildProgressNotification(id, task.title, percent, 0L))
         }
 
-        val scratch = mutableListOf<File>()
         var downloaded = false
         try {
-            val produced = when (task.kind) {
-                Kind.GENERIC -> runGeneric(task, id, scratch, report)
-                Kind.YOUTUBE -> runYouTube(task, id, scratch, report, stage)
-            }
+            val produced = produceWithRetries(task, id, report, stage)
             // The transfer and transcode helpers report failure by returning
             // rather than throwing, so a cancel can reach here looking like an
             // error. Turn it back into one before anything is written.
@@ -510,14 +637,20 @@ class DownloadService : Service() {
             // Deliberate stop. Nothing was produced, so the row goes away —
             // whether the Library already removed it or the cancel came from
             // the notification action, which leaves it behind.
-            withContext(NonCancellable) { dao.deleteById(id) }
+            withContext(NonCancellable) {
+                dao.deleteById(id)
+                DownloadPartials.discard(this@DownloadService, id)
+            }
             throw e
         } catch (e: Exception) {
             // A cancel does not always arrive as a CancellationException: the
             // HTTP layer turns a cancelled call into a plain IOException. What
             // matters is whether this job was stopped, not what was thrown.
             if (!currentCoroutineContext().isActive) {
-                withContext(NonCancellable) { dao.deleteById(id) }
+                withContext(NonCancellable) {
+                    dao.deleteById(id)
+                    DownloadPartials.discard(this@DownloadService, id)
+                }
             } else {
                 withContext(NonCancellable) {
                     dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
@@ -536,11 +669,105 @@ class DownloadService : Service() {
                     ?.takeIf { it.remaining == 0 }
                     ?.let { showBatchDoneNotification(it) }
             }
-            scratch.forEach { runCatching { it.delete() } }
+            // Only a finished download's scratch is thrown away. What a failed
+            // one fetched is exactly what makes a later retry cheap, so it stays
+            // until the row is completed or removed.
+            if (downloaded) DownloadPartials.discard(this, id)
             DownloadProgressBus.clear(id)
             nm.cancel(progressNotifId)
         }
     }
+
+    /**
+     * Transfers the download, having another go when one fails.
+     *
+     * Nothing fetched is thrown away between attempts, so a retry costs only the
+     * part that is still missing — and for YouTube it also re-resolves the
+     * stream URLs, which is the usual reason a long queue's later items fail:
+     * the signed links they were queued with have since expired.
+     */
+    private suspend fun produceWithRetries(
+        task: Task,
+        id: Long,
+        report: (Int, Long) -> Unit,
+        stage: (Int) -> Unit
+    ): Produced? {
+        var attempt = 0
+        while (true) {
+            val produced = try {
+                when (task.kind) {
+                    Kind.GENERIC -> runGeneric(task, id, report)
+                    Kind.YOUTUBE -> runYouTube(task, id, report, stage)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // A cancelled socket surfaces here as a plain IOException; that
+                // is a stop, not a failure, and must not be retried.
+                currentCoroutineContext().ensureActive()
+                if (attempt >= MAX_JOB_ATTEMPTS - 1) throw e
+                null
+            }
+            if (produced != null) return produced
+
+            currentCoroutineContext().ensureActive()
+            if (++attempt >= MAX_JOB_ATTEMPTS) return null
+            // No byte count to show while waiting, and the percentage from the
+            // abandoned attempt would only look stuck.
+            stage(-1)
+            awaitNetwork()
+            delay(JOB_RETRY_DELAY_MS * attempt)
+        }
+    }
+
+    /**
+     * Waits for the device to have a network again, giving up after
+     * [NETWORK_WAIT_MS]. A dropped connection is what most download failures
+     * are, and retrying into a radio that is still down just burns the attempt.
+     */
+    private suspend fun awaitNetwork() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        if (cm.hasInternet()) return
+        var callback: ConnectivityManager.NetworkCallback? = null
+        try {
+            withTimeoutOrNull(NETWORK_WAIT_MS) {
+                suspendCancellableCoroutine { continuation ->
+                    val cb = object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                            if (continuation.isActive) continuation.resume(Unit)
+                        }
+                    }
+                    val registered = runCatching {
+                        cm.registerNetworkCallback(
+                            NetworkRequest.Builder()
+                                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                .build(),
+                            cb
+                        )
+                    }.isSuccess
+                    if (registered) callback = cb
+                    else if (continuation.isActive) continuation.resume(Unit)
+                }
+            }
+        } finally {
+            callback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+        }
+    }
+
+    private fun ConnectivityManager.hasInternet(): Boolean = runCatching {
+        val capabilities = getNetworkCapabilities(activeNetwork) ?: return false
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }.getOrDefault(true)
+
+    private fun Task.toRequest() = com.nsl.downloader.data.DownloadRequest(
+        kind = kind.name,
+        headers = headers,
+        ytFormat = ytFormat.name,
+        ytHeight = ytHeight,
+        mp3Bitrate = mp3Bitrate,
+        userAgent = userAgent,
+        folderName = folderName
+    )
 
     /**
      * Last resort when shared storage rejects the file — most plausibly a
@@ -567,7 +794,6 @@ class DownloadService : Service() {
     private suspend fun runGeneric(
         task: Task,
         id: Long,
-        scratch: MutableList<File>,
         report: (Int, Long) -> Unit
     ): Produced? {
         val sanitized = MediaStorage.sanitizeName(task.title)
@@ -580,7 +806,7 @@ class DownloadService : Service() {
                 task.url.substringAfterLast('.').substringBefore('?')
                     .takeIf { it.length in 2..4 } ?: "mp4"
         }
-        val output = File(workDir, "$sanitized-$id.$extension").also { scratch.add(it) }
+        val output = File(workDir(id), "media.$extension")
 
         val ok = when (videoType) {
             VideoType.HLS -> hlsDownloader.download(task.url, output, task.headers, report)
@@ -601,7 +827,6 @@ class DownloadService : Service() {
     private suspend fun runYouTube(
         task: Task,
         id: Long,
-        scratch: MutableList<File>,
         report: (Int, Long) -> Unit,
         stage: (Int) -> Unit
     ): Produced? {
@@ -616,9 +841,9 @@ class DownloadService : Service() {
         )
 
         return if (task.ytFormat == YtFormat.MP3) {
-            runYouTubeMp3(task, id, resolved, sanitized, scratch, report, stage)
+            runYouTubeMp3(task, id, resolved, sanitized, report, stage)
         } else {
-            runYouTubeMp4(task, id, resolved, sanitized, scratch, report, stage)
+            runYouTubeMp4(task, id, resolved, sanitized, report, stage)
         }
     }
 
@@ -627,23 +852,22 @@ class DownloadService : Service() {
         id: Long,
         resolved: YouTubeResolver.Resolved,
         sanitized: String,
-        scratch: MutableList<File>,
         report: (Int, Long) -> Unit,
         stage: (Int) -> Unit
     ): Produced? {
         val option = pickVideoOption(resolved.videoOptions, task.ytHeight) ?: return null
+        val dir = workDir(id)
 
         if (!option.needsMux) {
-            val output = File(workDir, "$sanitized-$id.mp4").also { scratch.add(it) }
+            val output = File(dir, "media.mp4")
             if (!downloadDirect(option.videoUrl, output, emptyMap(), report)) return null
             return Produced(output, "$sanitized.mp4", "video/mp4", output.length())
         }
 
         // Split renditions: fetch both tracks, then remux. The byte-level
         // progress covers the two transfers; muxing tops it up to 95.
-        val videoPart = File(workDir, "$sanitized-$id.v.mp4").also { scratch.add(it) }
-        val audioPart = File(workDir, "$sanitized-$id.a.${option.audioSuffix}")
-            .also { scratch.add(it) }
+        val videoPart = File(dir, "video.mp4")
+        val audioPart = File(dir, "audio.${option.audioSuffix}")
 
         if (!downloadDirect(option.videoUrl, videoPart, emptyMap()) { p, b ->
                 report(scalePercent(p, 0, 75), b)
@@ -655,7 +879,7 @@ class DownloadService : Service() {
         ) return null
 
         stage(92)
-        val output = File(workDir, "$sanitized-$id.mp4").also { scratch.add(it) }
+        val output = File(dir, "media.mp4")
         val job = currentCoroutineContext()[kotlinx.coroutines.Job]
         if (!Mp4Muxer.mux(
                 videoPart,
@@ -673,13 +897,12 @@ class DownloadService : Service() {
         id: Long,
         resolved: YouTubeResolver.Resolved,
         sanitized: String,
-        scratch: MutableList<File>,
         report: (Int, Long) -> Unit,
         stage: (Int) -> Unit
     ): Produced? {
         val source = resolved.audioOptions.firstOrNull() ?: return null
-        val audioPart = File(workDir, "$sanitized-$id.src.${source.suffix}")
-            .also { scratch.add(it) }
+        val dir = workDir(id)
+        val audioPart = File(dir, "source.${source.suffix}")
 
         if (!downloadDirect(source.url, audioPart, emptyMap()) { p, b ->
                 report(scalePercent(p, 0, 45), b)
@@ -687,7 +910,7 @@ class DownloadService : Service() {
         ) return null
 
         // Pure-Java LAME: slow enough that the user needs to see it moving.
-        val output = File(workDir, "$sanitized-$id.mp3").also { scratch.add(it) }
+        val output = File(dir, "media.mp3")
         val ok = withContext(Dispatchers.Default) {
             val ctx = coroutineContext
             Mp3Transcoder.transcode(
@@ -809,7 +1032,7 @@ class DownloadService : Service() {
     /** The ongoing foreground notification summarising how many downloads run. */
     private fun summaryNotification(countOverride: Int? = null): Notification {
         val count = (
-            countOverride ?: synchronized(lock) { active + pending.size }
+            countOverride ?: synchronized(lock) { active + pending.size + loading }
             ).coerceAtLeast(1)
         val batches = DownloadQueueBus.state.value
         val single = batches.singleOrNull()
@@ -847,7 +1070,7 @@ class DownloadService : Service() {
     private fun refreshForegroundNotification() {
         val cancelledRunning = cancelledIds.count { running.containsKey(it) }
         val remaining = synchronized(lock) {
-            (active - cancelledRunning).coerceAtLeast(0) + pending.size
+            (active - cancelledRunning).coerceAtLeast(0) + pending.size + loading
         }
         if (remaining == 0) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -952,17 +1175,48 @@ class DownloadService : Service() {
 
     private fun showDoneNotification(id: Long, title: String, ok: Boolean) {
         val nm = getSystemService(NotificationManager::class.java)
-        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(
                 if (ok) android.R.drawable.stat_sys_download_done
                 else android.R.drawable.stat_notify_error
             )
-            .setContentTitle(if (ok) "Download complete" else "Download failed")
+            .setContentTitle(
+                getString(if (ok) R.string.notif_download_done else R.string.notif_download_failed)
+            )
             .setContentText(title)
             .setContentIntent(contentIntent())
             .setAutoCancel(true)
-            .build()
-        nm.notify(DONE_NOTIF_BASE + id.toInt(), n)
+        // The bytes that did arrive are still on disk, so this picks up where
+        // the attempt stopped rather than starting the file over.
+        if (!ok) {
+            builder.addAction(
+                android.R.drawable.stat_sys_download,
+                getString(R.string.resume_download),
+                retryIntent(id)
+            )
+        }
+        nm.notify(DONE_NOTIF_BASE + id.toInt(), builder.build())
+    }
+
+    /**
+     * Resumes the download that failed on row [videoId], straight from the
+     * shade. Unlike cancel, this fires when nothing is running any more, so it
+     * has to start the service into the foreground — a plain background service
+     * start is refused on Android 8 and up.
+     */
+    private fun retryIntent(videoId: Long): PendingIntent {
+        // Kept clear of the cancel and batch request codes.
+        val requestCode = (videoId + RETRY_REQUEST_OFFSET).toInt()
+        val intent = Intent(this, DownloadService::class.java).apply {
+            action = ACTION_RETRY
+            putExtra(EXTRA_VIDEO_ID, videoId)
+        }
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, requestCode, intent, flags)
+        } else {
+            PendingIntent.getService(this, requestCode, intent, flags)
+        }
     }
 
     override fun onDestroy() {
