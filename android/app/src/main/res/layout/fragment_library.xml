@@ -62,6 +62,79 @@
             app:selectionRequired="true" />
     </HorizontalScrollView>
 
+    <!-- Contextual bar for a running multi-select: it only exists while rows are
+         ticked, so it never competes with the header for space. -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/selectionBar"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="12dp"
+        android:layout_marginTop="4dp"
+        android:visibility="gone"
+        app:cardCornerRadius="12dp"
+        app:cardBackgroundColor="?attr/colorSecondaryContainer"
+        app:layout_constraintTop_toBottomOf="@id/folderScroll"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingVertical="4dp">
+
+            <ImageButton
+                android:id="@+id/btnCloseSelection"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:contentDescription="@string/library_selection_done" />
+
+            <TextView
+                android:id="@+id/selectionCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <!-- The per-item actions long-press used to open; shown only when a
+                 single row is picked, where they still make sense. -->
+            <ImageButton
+                android:id="@+id/btnSelectionMore"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_more"
+                android:contentDescription="@string/library_more_actions" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectAll"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="@string/library_select_all" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMoveSelected"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="0dp"
+                android:paddingHorizontal="12dp"
+                android:text="@string/library_move" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- Playlist queue: the items still waiting have no library row yet, so this
          is where their progress shows and where they can be called off. -->
     <com.google.android.material.card.MaterialCardView
@@ -72,7 +145,7 @@
         android:layout_marginTop="4dp"
         android:visibility="gone"
         app:cardCornerRadius="12dp"
-        app:layout_constraintTop_toBottomOf="@id/folderScroll"
+        app:layout_constraintTop_toBottomOf="@id/selectionBar"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 

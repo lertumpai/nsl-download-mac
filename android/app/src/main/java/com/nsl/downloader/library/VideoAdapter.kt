@@ -20,7 +20,8 @@ class VideoAdapter(
     private val onClick: (VideoEntity) -> Unit,
     private val onDelete: (VideoEntity) -> Unit,
     private val onLongClick: (VideoEntity) -> Unit,
-    private val onResume: (VideoEntity) -> Unit
+    private val onResume: (VideoEntity) -> Unit,
+    private val onToggleSelect: (VideoEntity) -> Unit
 ) : ListAdapter<VideoRow, VideoAdapter.VH>(DIFF) {
 
     companion object {
@@ -57,7 +58,17 @@ class VideoAdapter(
 
             // Default: hide progress UI.
             progressBar.visibility = View.GONE
-            btnResume.visibility = if (video.canResume) View.VISIBLE else View.GONE
+
+            // While a multi-select runs the row is a checkbox, not a set of
+            // per-item actions — acting on one video mid-selection would be a
+            // slip, and the bar above is where the actions live.
+            val selectable = row.selectionActive && video.canMove
+            checkbox.visibility = if (row.selectionActive) View.VISIBLE else View.GONE
+            checkbox.isEnabled = selectable
+            checkbox.isChecked = row.selected
+            btnResume.visibility =
+                if (video.canResume && !row.selectionActive) View.VISIBLE else View.GONE
+            btnDelete.visibility = if (row.selectionActive) View.GONE else View.VISIBLE
 
             when (video.status) {
                 DownloadStatus.COMPLETED -> {
@@ -108,23 +119,35 @@ class VideoAdapter(
                 thumbnail.setImageResource(android.R.drawable.ic_media_play)
             }
 
+            // A selected row is tinted rather than dimmed: dimming already means
+            // "not finished" here.
+            root.isActivated = row.selected
+
             // Whatever the failed attempt fetched is still on disk, so a failed
             // row is an offer to carry on, not a dead end.
             btnResume.setOnClickListener { onResume(video) }
             root.setOnClickListener {
                 when {
+                    row.selectionActive -> if (selectable) onToggleSelect(video)
                     video.status == DownloadStatus.COMPLETED -> onClick(video)
                     video.canResume -> onResume(video)
                     else -> Unit
                 }
             }
             root.setOnLongClickListener {
-                if (video.status == DownloadStatus.COMPLETED ||
-                    video.status == DownloadStatus.FAILED
-                ) {
-                    onLongClick(video)
-                    true
-                } else false
+                when {
+                    // The gesture that starts a multi-select is also the one
+                    // that extends it, so it keeps working once one is running.
+                    video.canMove -> {
+                        onToggleSelect(video)
+                        true
+                    }
+                    !row.selectionActive && video.status == DownloadStatus.FAILED -> {
+                        onLongClick(video)
+                        true
+                    }
+                    else -> false
+                }
             }
             // Same button, different meaning: mid-transfer it cancels.
             btnDelete.contentDescription = root.context.getString(

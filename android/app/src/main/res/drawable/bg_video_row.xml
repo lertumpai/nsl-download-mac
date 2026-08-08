@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The list row's own background: the usual ripple, plus a tint for the
+  activated state so a row picked in a multi-select reads as picked without
+  borrowing the dimming that already means "not finished".
+-->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/colorControlHighlight">
+
+    <item android:id="@android:id/mask">
+        <color android:color="@android:color/white" />
+    </item>
+
+    <item>
+        <selector>
+            <item android:state_activated="true">
+                <color android:color="?attr/colorSecondaryContainer" />
+            </item>
+            <item>
+                <color android:color="@android:color/transparent" />
+            </item>
+        </selector>
+    </item>
+</ripple>

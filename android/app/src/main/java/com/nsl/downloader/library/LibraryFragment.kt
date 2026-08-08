@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
@@ -38,8 +39,16 @@ class LibraryFragment : Fragment() {
         onClick = { openPlayer(it) },
         onDelete = { confirmDeleteSingle(it) },
         onLongClick = { showItemActions(it) },
-        onResume = { confirmResume(it) }
+        onResume = { confirmResume(it) },
+        onToggleSelect = { viewModel.toggleSelection(it) }
     )
+
+    /** Back leaves a running multi-select before it leaves the screen. */
+    private val backCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            viewModel.clearSelection()
+        }
+    }
 
     /** Guards against the chip listener firing while we rebuild the row. */
     private var rebuildingChips = false
@@ -58,6 +67,12 @@ class LibraryFragment : Fragment() {
 
         binding.btnRemoveAll.setOnClickListener { confirmRemoveAll() }
         binding.btnOpenFolder.setOnClickListener { openRealFolder() }
+        binding.btnCloseSelection.setOnClickListener { viewModel.clearSelection() }
+        binding.btnSelectAll.setOnClickListener { viewModel.selectAll() }
+        binding.btnMoveSelected.setOnClickListener { promptMoveSelection() }
+
+        requireActivity().onBackPressedDispatcher
+            .addCallback(viewLifecycleOwner, backCallback)
 
         viewLifecycleOwner.lifecycleScope.launch {
             viewModel.rows.collectLatest { list ->
@@ -69,6 +84,7 @@ class LibraryFragment : Fragment() {
                     else R.string.library_empty_folder
                 )
                 binding.btnRemoveAll.visibility = if (empty) View.GONE else View.VISIBLE
+                showSelectionBar(list.count { it.selected })
             }
         }
 
@@ -147,7 +163,12 @@ class LibraryFragment : Fragment() {
             }
         }
 
-    private fun promptCreateFolder() {
+    /**
+     * [onCreated] is how the move flows carry on into a folder that did not
+     * exist yet: with a caller waiting on it, the new folder is not browsed to,
+     * so the selection being moved survives the detour.
+     */
+    private fun promptCreateFolder(onCreated: ((id: Long, name: String) -> Unit)? = null) {
         val input = EditText(requireContext()).apply {
             hint = getString(R.string.library_folder_name_hint)
             setSingleLine()
@@ -158,11 +179,15 @@ class LibraryFragment : Fragment() {
             .setTitle(R.string.library_create_folder_title)
             .setView(input)
             .setPositiveButton(R.string.library_create) { _, _ ->
-                viewModel.createFolder(input.text.toString()) { created ->
-                    if (!created && isAdded) {
+                val name = input.text.toString().trim()
+                viewModel.createFolder(name, select = onCreated == null) { id ->
+                    if (!isAdded) return@createFolder
+                    if (id == null) {
                         Toast.makeText(
                             requireContext(), R.string.library_folder_exists, Toast.LENGTH_SHORT
                         ).show()
+                    } else {
+                        onCreated?.invoke(id, name)
                     }
                 }
             }
@@ -192,6 +217,88 @@ class LibraryFragment : Fragment() {
             if (runCatching { startActivity(intent) }.isSuccess) return
         }
         Toast.makeText(requireContext(), R.string.library_no_file_manager, Toast.LENGTH_LONG).show()
+    }
+
+    // ------------------------------------------------------- multi-select
+
+    /**
+     * The bar is the multi-select's only chrome, so it goes up and down with
+     * the pick itself — as does back, which would otherwise leave the screen
+     * with rows still ticked behind it.
+     */
+    private fun showSelectionBar(count: Int) {
+        val active = count > 0
+        binding.selectionBar.visibility = if (active) View.VISIBLE else View.GONE
+        backCallback.isEnabled = active
+        if (!active) return
+        binding.selectionCount.text =
+            getString(R.string.library_selected_count, count, viewModel.selectableCount())
+        binding.btnSelectionMore.visibility = if (count == 1) View.VISIBLE else View.GONE
+        binding.btnSelectionMore.setOnClickListener {
+            viewModel.selectedVideos.singleOrNull()?.let { showItemActions(it) }
+        }
+        binding.btnSelectAll.isEnabled = count < viewModel.selectableCount()
+    }
+
+    /** Move for the whole selection; single moves go through [promptMove]. */
+    private fun promptMoveSelection() {
+        val picked = viewModel.selectedVideos
+        if (picked.isEmpty()) return
+        // A target worth offering is one that would actually move something —
+        // which only rules anything out when the whole pick sits in one folder.
+        val sourceFolders = picked.map { it.folderId }.toSet()
+        val excluding = if (sourceFolders.size == 1) sourceFolders else emptySet()
+        promptMoveTo(excluding) { targetId, targetName ->
+            viewModel.moveVideos(picked, targetId) { moved ->
+                if (!isAdded) return@moveVideos
+                Toast.makeText(
+                    requireContext(),
+                    resources.getQuantityString(
+                        R.plurals.library_moved_count, moved, moved, targetName
+                    ),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * The folder chooser both move paths share. [excluding] drops targets that
+     * would not move anything; picking "New folder" restarts the flow once the
+     * folder exists, so the selection is not lost to a detour.
+     */
+    private fun promptMoveTo(
+        excluding: Set<Long?>,
+        onPick: (targetId: Long?, targetName: String) -> Unit
+    ) {
+        val targets = buildList<Pair<String, Long?>> {
+            add(getString(R.string.library_root) to null)
+            viewModel.folders.value.forEach { add(it.name to it.id) }
+        }.filter { it.second !in excluding }
+
+        if (targets.isEmpty()) {
+            promptCreateFolder { id, name -> onPick(id, name) }
+            return
+        }
+
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.library_move_to)
+            .setItems(targets.map { it.first }.toTypedArray()) { _, which ->
+                val (name, id) = targets[which]
+                onPick(id, name)
+            }
+            .setNeutralButton(R.string.library_new_folder) { _, _ ->
+                promptCreateFolder { id, name -> onPick(id, name) }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    override fun onHiddenChanged(hidden: Boolean) {
+        super.onHiddenChanged(hidden)
+        // The tabs share one back dispatcher; a pick left running behind the
+        // browser would swallow its back press.
+        if (hidden) viewModel.clearSelection()
     }
 
     // ---------------------------------------------------------------- items
@@ -231,29 +338,12 @@ class LibraryFragment : Fragment() {
     }
 
     private fun promptMove(video: VideoEntity) {
-        val folders = viewModel.folders.value
-        val targets = buildList<Pair<String, Long?>> {
-            add(getString(R.string.library_root) to null)
-            folders.forEach { add(it.name to it.id) }
-        }.filter { it.second != video.folderId }
-
-        if (targets.isEmpty()) {
-            promptCreateFolder()
-            return
+        promptMoveTo(excluding = setOf(video.folderId)) { targetId, targetName ->
+            viewModel.moveVideo(video, targetId)
+            Toast.makeText(
+                requireContext(), getString(R.string.library_moved, targetName), Toast.LENGTH_SHORT
+            ).show()
         }
-
-        MaterialAlertDialogBuilder(requireContext())
-            .setTitle(R.string.library_move_to)
-            .setItems(targets.map { it.first }.toTypedArray()) { _, which ->
-                val (name, id) = targets[which]
-                viewModel.moveVideo(video, id)
-                Toast.makeText(
-                    requireContext(), getString(R.string.library_moved, name), Toast.LENGTH_SHORT
-                ).show()
-            }
-            .setNeutralButton(R.string.library_new_folder) { _, _ -> promptCreateFolder() }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
     }
 
     private fun shareVideo(video: VideoEntity) {

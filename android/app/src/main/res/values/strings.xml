@@ -109,6 +109,16 @@
     <string name="library_move_to">Move to folder…</string>
     <string name="library_root">Library root</string>
     <string name="library_moved">Moved to %1$s</string>
+    <string name="library_move">Move</string>
+    <string name="library_select">Select</string>
+    <string name="library_more_actions">More actions</string>
+    <string name="library_select_all">Select all</string>
+    <string name="library_selection_done">Done selecting</string>
+    <string name="library_selected_count">%1$d of %2$d selected</string>
+    <plurals name="library_moved_count">
+        <item quantity="one">Moved %1$d video to %2$s</item>
+        <item quantity="other">Moved %1$d videos to %2$s</item>
+    </plurals>
     <string name="library_no_file_manager">No app on this device can open that folder</string>
     <string name="library_share_failed">That file cannot be shared</string>
     <string name="library_play">Play</string>

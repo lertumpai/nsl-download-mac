@@ -32,6 +32,13 @@ data class VideoEntity(
      */
     val canResume: Boolean
         get() = status == DownloadStatus.FAILED && sourceUrl.isNotBlank()
+
+    /**
+     * Only a finished download has a file to put in a folder, so only those can
+     * be picked for a move — a partial one still belongs to the service.
+     */
+    val canMove: Boolean
+        get() = status == DownloadStatus.COMPLETED && localPath.isNotBlank()
 }
 
 /**
