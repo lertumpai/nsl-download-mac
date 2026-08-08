@@ -434,7 +434,7 @@ class DownloadService : Service() {
         scope.launch {
             val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
             val row = dao.getById(videoId)
-                ?.takeIf { it.status != DownloadStatus.COMPLETED && it.request.isUsable }
+                ?.takeIf { it.status != DownloadStatus.COMPLETED && it.sourceUrl.isNotBlank() }
             // Surfacing the row as active straight away — the transfer itself
             // may sit in the queue behind other downloads for a while.
             if (row != null) {
@@ -454,7 +454,7 @@ class DownloadService : Service() {
     }
 
     private fun VideoEntity.toTask(): Task = Task(
-        kind = runCatching { Kind.valueOf(request.kind) }.getOrDefault(Kind.GENERIC),
+        kind = runCatching { Kind.valueOf(request.kind) }.getOrElse { inferKind(sourceUrl) },
         url = sourceUrl,
         title = title,
         headers = request.headers,
@@ -468,6 +468,15 @@ class DownloadService : Service() {
         batchId = 0L,
         videoId = id
     )
+
+    /**
+     * The kind of a row written before downloads recorded how they were made.
+     * Only YouTube has to be told apart: retried as a plain file download, a
+     * watch URL would save the web page instead of the video. Everything else
+     * stored its media URL, which the generic path classifies on its own.
+     */
+    private fun inferKind(sourceUrl: String): Kind =
+        if (YouTubeResolver.isYouTubeUrl(sourceUrl)) Kind.YOUTUBE else Kind.GENERIC
 
     /** Launch as many queued downloads as the concurrency limit allows. */
     private fun pump() {

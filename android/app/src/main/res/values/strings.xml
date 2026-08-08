@@ -130,7 +130,6 @@
     <string name="notif_download_failed">Download failed</string>
     <string name="resume_download">Resume</string>
     <string name="library_failed">Failed</string>
-    <string name="library_failed_tap_resume">Failed • tap to resume</string>
     <string name="library_resume_title">Resume download</string>
     <string name="library_resume_message">Continue downloading “%1$s” from where it stopped?</string>
 

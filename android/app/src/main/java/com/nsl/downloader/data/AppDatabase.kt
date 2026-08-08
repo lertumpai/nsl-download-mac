@@ -54,11 +54,12 @@ abstract class AppDatabase : RoomDatabase() {
                     "req_userAgent TEXT NOT NULL DEFAULT ''",
                     "req_folderName TEXT"
                 ).forEach { database.execSQL("ALTER TABLE videos ADD COLUMN $it") }
-                // Rows from before this column existed only ever recorded the
-                // page they came from, which is not enough to fetch them again
-                // — a YouTube watch URL downloaded as a plain file is a saved
-                // web page, not a video. Blanking the kind marks them as not
-                // resumable; see [DownloadRequest.isUsable].
+                // Rows from before this column existed never recorded how they
+                // were fetched, and the default above would claim they were
+                // plain file downloads — a YouTube watch URL fetched that way
+                // is a saved web page, not a video. Blanking the kind marks
+                // them as unknown; DownloadService.inferKind reads it back off
+                // the source URL when one of them is resumed.
                 database.execSQL("UPDATE videos SET req_kind = ''")
             }
         }

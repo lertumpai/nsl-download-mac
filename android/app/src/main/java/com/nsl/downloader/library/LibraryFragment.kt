@@ -208,7 +208,7 @@ class LibraryFragment : Fragment() {
     private fun showItemActions(video: VideoEntity) {
         val actions = if (video.status == DownloadStatus.FAILED) {
             buildList<Pair<String, () -> Unit>> {
-                if (video.request.isUsable) {
+                if (video.canResume) {
                     add(getString(R.string.resume_download) to { confirmResume(video) })
                 }
                 add(getString(R.string.remove) to { confirmDeleteSingle(video) })

@@ -57,6 +57,7 @@ class VideoAdapter(
 
             // Default: hide progress UI.
             progressBar.visibility = View.GONE
+            btnResume.visibility = if (video.canResume) View.VISIBLE else View.GONE
 
             when (video.status) {
                 DownloadStatus.COMPLETED -> {
@@ -87,13 +88,7 @@ class VideoAdapter(
                 }
                 DownloadStatus.FAILED -> {
                     statusBadge.visibility = View.VISIBLE
-                    // Whatever the failed attempt fetched is still on disk, so
-                    // the row is an offer to carry on, not a dead end — unless
-                    // it predates downloads recording how they were made.
-                    statusBadge.text = root.context.getString(
-                        if (video.request.isUsable) R.string.library_failed_tap_resume
-                        else R.string.library_failed
-                    )
+                    statusBadge.text = root.context.getString(R.string.library_failed)
                     root.alpha = 0.6f
                 }
                 DownloadStatus.PENDING -> {
@@ -113,11 +108,13 @@ class VideoAdapter(
                 thumbnail.setImageResource(android.R.drawable.ic_media_play)
             }
 
+            // Whatever the failed attempt fetched is still on disk, so a failed
+            // row is an offer to carry on, not a dead end.
+            btnResume.setOnClickListener { onResume(video) }
             root.setOnClickListener {
                 when {
                     video.status == DownloadStatus.COMPLETED -> onClick(video)
-                    video.status == DownloadStatus.FAILED && video.request.isUsable ->
-                        onResume(video)
+                    video.canResume -> onResume(video)
                     else -> Unit
                 }
             }

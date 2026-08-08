@@ -116,7 +116,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      * attempt fetched, so this continues it instead of starting over.
      */
     fun resumeVideo(video: VideoEntity) {
-        if (video.status != DownloadStatus.FAILED || !video.request.isUsable) return
+        if (!video.canResume) return
         DownloadService.retry(getApplication(), video.id)
     }
 

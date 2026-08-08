@@ -22,7 +22,17 @@ data class VideoEntity(
     val mimeType: String = "video/mp4",
     /** How to fetch this entry again if the first attempt did not finish. */
     @Embedded(prefix = "req_") val request: DownloadRequest = DownloadRequest()
-)
+) {
+    /**
+     * A failed download can be picked back up as long as we still know where it
+     * came from — whatever the attempt fetched is still on disk, so resuming
+     * only transfers the part that is missing. Rows written before downloads
+     * recorded how they were made carry a blank [DownloadRequest.kind]; the
+     * service reads that back off [sourceUrl] instead of refusing them.
+     */
+    val canResume: Boolean
+        get() = status == DownloadStatus.FAILED && sourceUrl.isNotBlank()
+}
 
 /**
  * Everything the download service needs to start the transfer that fills a
@@ -42,13 +52,6 @@ data class DownloadRequest(
     val mp3Bitrate: Int = 192,
     val userAgent: String = "",
     val folderName: String? = null
-) {
-    /**
-     * False for rows written before downloads recorded how they were made.
-     * Guessing at those would be worse than not offering to resume them: a
-     * YouTube row retried as a plain file download saves the web page.
-     */
-    val isUsable: Boolean get() = kind.isNotBlank()
-}
+)
 
 enum class DownloadStatus { PENDING, DOWNLOADING, COMPLETED, FAILED }
