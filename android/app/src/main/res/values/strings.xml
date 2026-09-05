@@ -78,6 +78,12 @@
     <string name="yt_playlist_queued">Queued %1$d downloads</string>
     <string name="yt_merged">video + audio merged</string>
 
+    <!-- VK -->
+    <string name="vk_download_title">Select quality</string>
+    <string name="vk_reading">Reading available qualities…</string>
+    <string name="vk_no_streams">No downloadable video here yet. Start playing the video, then tap Download.</string>
+    <string name="vk_opened_for_download">Opened in a new tab — start the video, then tap Download.</string>
+
     <!-- Settings -->
     <string name="settings_title">Settings</string>
     <string name="menu_settings">Settings</string>

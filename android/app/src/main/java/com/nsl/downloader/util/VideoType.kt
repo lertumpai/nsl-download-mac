@@ -8,8 +8,12 @@ enum class VideoType { DIRECT, HLS, DASH }
 fun detectVideoType(url: String): VideoType {
     val lower = url.substringBefore('?').lowercase()
     return when {
-        lower.contains(".m3u8") -> VideoType.HLS
-        lower.contains(".mpd") -> VideoType.DASH
+        // VK names its master playlist `video_hls.php`, with the manifest
+        // itself arriving as the response body rather than as a `.m3u8` path.
+        lower.contains(".m3u8") || lower.contains("video_hls") ||
+            lower.contains("/hls/") -> VideoType.HLS
+        lower.contains(".mpd") || lower.contains("dash_sep") ||
+            lower.contains("/dash/") -> VideoType.DASH
         else -> VideoType.DIRECT
     }
 }
@@ -38,6 +42,7 @@ fun isLikelyVideoUrl(url: String, mimeType: String? = null): Boolean {
     }
     // Common streaming query patterns
     if (lower.contains("/manifest") || lower.contains("videoplayback")) return true
+    if (lower.contains("video_hls") || lower.contains("dash_sep")) return true
     return false
 }
 

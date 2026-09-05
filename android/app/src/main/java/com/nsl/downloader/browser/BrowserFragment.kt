@@ -35,6 +35,8 @@ import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.util.guessTitleFromUrl
 import com.nsl.downloader.util.VideoType
+import com.nsl.downloader.vk.VkResolver
+import com.nsl.downloader.vk.VkScripts
 import com.nsl.downloader.youtube.YouTubeResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -105,16 +107,32 @@ class BrowserFragment : Fragment() {
                     videoWidth = 0
                     videoHeight = 0
                     injectBackgroundScript(view)
+                    injectVkScript(view, url)
                     if (this@Tab === currentTab) {
                         binding.urlBar.setText(url)
                         updateFab()
                     }
                 }
 
+                /**
+                 * VK opens a video by rewriting the URL, never by loading a
+                 * document, so this is the only callback that fires when the
+                 * user picks a clip out of a feed — without it the Download
+                 * button would keep judging the page the tab first landed on.
+                 */
+                override fun doUpdateVisitedHistory(
+                    view: WebView?, url: String?, isReload: Boolean
+                ) {
+                    super.doUpdateVisitedHistory(view, url, isReload)
+                    injectVkScript(view, url)
+                    if (this@Tab === currentTab) updateFab()
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     injectBackgroundScript(view)
                     injectAdBlockScript(view)
+                    injectVkScript(view, url)
                     if (pictureInPictureActive && this@Tab === currentTab) {
                         view?.evaluateJavascript(BrowserScripts.PIP_FIT_ON, null)
                     }
@@ -201,6 +219,16 @@ class BrowserFragment : Fragment() {
         fun injectAdBlockScript(view: WebView?) {
             if (!prefs.adBlockEnabled) return
             view?.evaluateJavascript(BrowserScripts.AD_BLOCK_COSMETIC, null)
+        }
+
+        /**
+         * Starts watching for VK's player parameters. The script guards itself
+         * against running twice, so the repeated calls across the page
+         * lifecycle cost nothing.
+         */
+        fun injectVkScript(view: WebView?, url: String?) {
+            if (url == null || !VkResolver.isVkUrl(url)) return
+            view?.evaluateJavascript(VkScripts.HOOK, null)
         }
 
         /** Called from the JS bridge (worker thread) and from page transitions. */
@@ -691,6 +719,15 @@ class BrowserFragment : Fragment() {
             showYouTubeDialog(url, guessTitleFromUrl(url))
             return
         }
+        // A VK video page is not a file: its stream URLs are signed per session
+        // and only exist once the player has been handed them, so the video has
+        // to be opened before there is anything to fetch.
+        if (VkResolver.isVideoPageUrl(url)) {
+            addNewTab(url)
+            Toast.makeText(requireContext(), R.string.vk_opened_for_download, Toast.LENGTH_LONG)
+                .show()
+            return
+        }
         startDownload(url, guessTitleFromUrl(url), buildHeaders(url, emptyMap()))
     }
 
@@ -793,10 +830,11 @@ class BrowserFragment : Fragment() {
     private fun updateFab() {
         val count = currentTab.sniffer.count()
         val youTube = isYouTubePage()
-        if (count > 0 || youTube) {
+        val vk = isVkPage()
+        if (count > 0 || youTube || vk) {
             binding.fabDownload.show()
             binding.fabDownload.text =
-                if (youTube) getString(R.string.download) else "Download ($count)"
+                if (youTube || vk) getString(R.string.download) else "Download ($count)"
             onFooterCollapsedChanged(
                 (activity as? com.nsl.downloader.MainActivity)?.isFooterCollapsed() ?: false
             )
@@ -812,12 +850,22 @@ class BrowserFragment : Fragment() {
                 YouTubeResolver.playlistIdOf(url) != null)
     }
 
+    /**
+     * Like [isYouTubePage], this only checks the URL: VK's streams are never
+     * visible to [VideoSniffer], so the button has to be offered before there
+     * is any proof that something downloadable is there.
+     */
+    private fun isVkPage(): Boolean {
+        val url = currentWebView.url ?: return false
+        return VkResolver.isVideoPageUrl(url)
+    }
+
     private fun onDownloadTapped() {
         val url = currentWebView.url
-        if (url != null && isYouTubePage()) {
-            showYouTubeDialog(url, youTubePageTitle(url))
-        } else {
-            showVideoPicker()
+        when {
+            url != null && isYouTubePage() -> showYouTubeDialog(url, youTubePageTitle(url))
+            url != null && isVkPage() -> showVkDialog(url)
+            else -> showVideoPicker()
         }
     }
 
@@ -1091,6 +1139,59 @@ class BrowserFragment : Fragment() {
         )
         Toast.makeText(requireContext(), R.string.download_started, Toast.LENGTH_SHORT).show()
         (activity as? com.nsl.downloader.MainActivity)?.showLibrary()
+    }
+
+    // ------------------------------------------------------------- VK UI
+
+    /**
+     * Entry point for a VK video page.
+     *
+     * The stream URLs are read out of the live page rather than resolved over
+     * the network: VK signs them against the visitor's session, so a URL
+     * fetched from anywhere but this WebView would be refused.
+     */
+    private fun showVkDialog(pageUrl: String) {
+        Toast.makeText(requireContext(), R.string.vk_reading, Toast.LENGTH_SHORT).show()
+        currentWebView.evaluateJavascript(VkScripts.COLLECT) { result ->
+            if (!isAdded) return@evaluateJavascript
+            val fallbackTitle = currentWebView.title ?: guessTitleFromUrl(pageUrl)
+            val resolved = VkResolver.parse(result.orEmpty(), fallbackTitle)
+
+            if (resolved.sources.isEmpty()) {
+                // Nothing in the page yet — usually because the player has not
+                // been opened. Anything the sniffer caught is still worth a try.
+                if (currentTab.sniffer.count() > 0) {
+                    showVideoPicker()
+                } else {
+                    Toast.makeText(requireContext(), R.string.vk_no_streams, Toast.LENGTH_LONG)
+                        .show()
+                }
+                return@evaluateJavascript
+            }
+
+            if (resolved.sources.size == 1) {
+                startVkDownload(resolved.sources.first(), resolved.title, labelled = false)
+                return@evaluateJavascript
+            }
+
+            val labels = resolved.sources.map { it.label }.toTypedArray()
+            MaterialAlertDialogBuilder(requireContext())
+                .setTitle(R.string.vk_download_title)
+                .setItems(labels) { _, which ->
+                    startVkDownload(resolved.sources[which], resolved.title, labelled = true)
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    private fun startVkDownload(
+        source: VkResolver.Source,
+        title: String,
+        labelled: Boolean
+    ) {
+        val name = if (labelled) "$title (${source.label})" else title
+        startDownload(source.url, name, buildHeaders(source.url, emptyMap()))
     }
 
     // ------------------------------------------------------ sniffed videos
