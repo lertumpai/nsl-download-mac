@@ -130,6 +130,20 @@
     <string name="library_play">Play</string>
     <string name="library_share">Share</string>
     <string name="library_empty_folder">This folder is empty.</string>
+    <string name="library_repair">Repair</string>
+    <string name="library_repairing_percent">Repairing… %1$d%%</string>
+    <string name="library_stop_repair">Stop</string>
+    <string name="library_repair_progress">Repairing %1$d of %2$d • %3$s • %4$d%%</string>
+    <plurals name="library_repair_title">
+        <item quantity="one">Repair %1$d video?</item>
+        <item quantity="other">Repair %1$d videos?</item>
+    </plurals>
+    <plurals name="library_repair_message">
+        <item quantity="one">The original is kept. If this video is already playable, it will be skipped.</item>
+        <item quantity="other">Videos are repaired one at a time and the originals are kept. Files that are already playable will be skipped.</item>
+    </plurals>
+    <string name="library_repair_finished">Repair results — repaired: %1$d; already playable: %2$d; failed: %3$d</string>
+    <string name="library_repair_cancelled">Repair stopped. Completed repairs: %1$d</string>
 
     <!-- Playlist queue -->
     <string name="library_batch_progress">Playlist “%1$s” • %2$d of %3$d downloaded</string>

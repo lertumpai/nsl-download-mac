@@ -416,6 +416,7 @@ object MediaStorage {
             context.contentResolver.openAssetFileDescriptor(Uri.parse(location), "r")
                 ?.use { true } ?: false
         }.getOrDefault(false)
+        location.startsWith("file:") -> File(Uri.parse(location).path.orEmpty()).exists()
         else -> File(location).exists()
     }
 

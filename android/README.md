@@ -59,7 +59,12 @@ of any content/streaming type, and **play them back** with a gesture-driven play
     one. A library folder *is* a real subdirectory of `Download/NSL Downloader/`, and moving an
     item (long-press → **Move to folder…**) relocates the actual file.
   - **Open folder** — opens the current folder in the device's file manager.
-  - **Long-press an item** for Play / Move / Share / Remove.
+  - **Multi-select repair** — long-press a video, select more videos or tap **Select all**,
+    then tap **Repair**. Legacy MP4 audio is repaired one video at a time; healthy files are
+    skipped and each repaired copy replaces the old entry in the Library while preserving the
+    original file.
+  - **Long-press an item** to select it; the action bar provides Repair and Move, while the
+    overflow menu for one selected item provides Play / Repair / Move / Share / Remove.
   - **Delete one** — trash icon → confirm → removes the DB row **and the file(s)**.
   - **Remove all** — wipes every entry in the current folder and its files.
 - **Fullscreen video** — pages that call `requestFullscreen()` (YouTube included) are hosted

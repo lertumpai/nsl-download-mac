@@ -39,6 +39,10 @@ data class VideoEntity(
      */
     val canMove: Boolean
         get() = status == DownloadStatus.COMPLETED && localPath.isNotBlank()
+
+    /** Only completed MP4 videos can contain the legacy AAC packaging defect. */
+    val canRepair: Boolean
+        get() = canMove && mimeType.equals("video/mp4", ignoreCase = true)
 }
 
 /**

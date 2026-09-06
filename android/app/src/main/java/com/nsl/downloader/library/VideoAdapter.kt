@@ -67,12 +67,19 @@ class VideoAdapter(
             checkbox.isEnabled = selectable
             checkbox.isChecked = row.selected
             btnResume.visibility =
-                if (video.canResume && !row.selectionActive) View.VISIBLE else View.GONE
-            btnDelete.visibility = if (row.selectionActive) View.GONE else View.VISIBLE
+                if (video.canResume && !row.selectionActive && !row.repairBatchActive) View.VISIBLE else View.GONE
+            btnDelete.visibility =
+                if (row.selectionActive || row.repairBatchActive) View.GONE else View.VISIBLE
 
             when (video.status) {
                 DownloadStatus.COMPLETED -> {
-                    statusBadge.visibility = View.GONE
+                    statusBadge.visibility = if (row.repairPercent == null) View.GONE else View.VISIBLE
+                    row.repairPercent?.let {
+                        statusBadge.text = root.context.getString(R.string.library_repairing_percent, it)
+                        progressBar.visibility = View.VISIBLE
+                        progressBar.isIndeterminate = false
+                        progressBar.progress = it
+                    }
                     root.alpha = 1f
                 }
                 DownloadStatus.DOWNLOADING -> {
@@ -128,6 +135,7 @@ class VideoAdapter(
             btnResume.setOnClickListener { onResume(video) }
             root.setOnClickListener {
                 when {
+                    row.repairBatchActive -> Unit
                     row.selectionActive -> if (selectable) onToggleSelect(video)
                     video.status == DownloadStatus.COMPLETED -> onClick(video)
                     video.canResume -> onResume(video)
@@ -136,6 +144,7 @@ class VideoAdapter(
             }
             root.setOnLongClickListener {
                 when {
+                    row.repairBatchActive -> false
                     // The gesture that starts a multi-select is also the one
                     // that extends it, so it keeps working once one is running.
                     video.canMove -> {

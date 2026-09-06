@@ -14,6 +14,12 @@ import java.io.IOException
 
 /** Repairs old ADTS-in-MP4 downloads into a new copy; the original is never overwritten. */
 internal object VideoRepair {
+    /** Strict probe used by batch repair, where an unreadable MP4 is a failure. */
+    suspend fun needsRepair(context: Context, location: String): Boolean =
+        withContext(Dispatchers.IO) {
+            Mp4Muxer.needsAudioRepair(context, MediaStorage.toUri(location))
+        }
+
     suspend fun prepare(context: Context, location: String, videoId: Long,
         onRepairProgress: (Int) -> Unit): String = withContext(Dispatchers.IO) {
         val uri = MediaStorage.toUri(location)

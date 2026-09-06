@@ -10,14 +10,20 @@ import com.nsl.downloader.data.FolderEntity
 import com.nsl.downloader.data.VideoEntity
 import com.nsl.downloader.service.DownloadPartials
 import com.nsl.downloader.service.DownloadService
+import com.nsl.downloader.player.VideoRepair
 import com.nsl.downloader.util.MediaStorage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
 
 /**
  * A library entry plus its live download progress (null when not downloading)
@@ -27,7 +33,24 @@ data class VideoRow(
     val video: VideoEntity,
     val progress: DownloadProgressBus.Info?,
     val selected: Boolean = false,
-    val selectionActive: Boolean = false
+    val selectionActive: Boolean = false,
+    val repairBatchActive: Boolean = false,
+    val repairPercent: Int? = null
+)
+
+data class RepairProgress(
+    val videoId: Long,
+    val title: String,
+    val current: Int,
+    val total: Int,
+    val percent: Int
+)
+
+data class RepairResult(
+    val repaired: Int,
+    val alreadyPlayable: Int,
+    val failed: Int,
+    val cancelled: Boolean
 )
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
@@ -44,6 +67,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      */
     val selectedIds = MutableStateFlow<Set<Long>>(emptySet())
 
+    val repairProgress = MutableStateFlow<RepairProgress?>(null)
+    private val _repairResults = MutableSharedFlow<RepairResult>(extraBufferCapacity = 1)
+    val repairResults = _repairResults.asSharedFlow()
+    private var repairJob: Job? = null
+
     val folders = folderDao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -52,10 +80,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      * narrowed to the selected folder.
      */
     val rows = combine(
-        dao.observeAll(), DownloadProgressBus.state, selectedFolderId, selectedIds
-    ) { list, progress, folderId, picked ->
+        dao.observeAll(), DownloadProgressBus.state, selectedFolderId, selectedIds, repairProgress
+    ) { list, progress, folderId, picked, repair ->
         list.inLibraryFolder(folderId)
-            .map { VideoRow(it, progress[it.id], it.id in picked, picked.isNotEmpty()) }
+            .map {
+                VideoRow(
+                    it, progress[it.id], it.id in picked, picked.isNotEmpty(),
+                    repair != null, repair?.takeIf { active -> active.videoId == it.id }?.percent
+                )
+            }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun selectFolder(id: Long?) {
@@ -89,6 +122,64 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** How many rows in the current view a multi-select could take. */
     fun selectableCount(): Int = rows.value.count { it.video.canMove }
+
+    // ---------------------------------------------------------- video repair
+
+    /**
+     * Repairs selected legacy MP4 downloads sequentially. Remuxing one movie
+     * at a time limits temporary storage and memory use; healthy MP4s are
+     * detected quickly and skipped without creating another copy.
+     */
+    fun repairVideos(videos: List<VideoEntity>) {
+        if (repairJob?.isActive == true) return
+        val candidates = videos.filter { it.canRepair }.distinctBy { it.id }
+        if (candidates.isEmpty()) return
+        clearSelection()
+        repairJob = viewModelScope.launch {
+            var repaired = 0
+            var alreadyPlayable = 0
+            var failed = 0
+            var cancelled = false
+            try {
+                candidates.forEachIndexed { index, video ->
+                    repairProgress.value = RepairProgress(
+                        video.id, video.title, index + 1, candidates.size, 0
+                    )
+                    try {
+                        if (!MediaStorage.exists(getApplication(), video.localPath)) {
+                            throw IOException("Downloaded file is missing")
+                        }
+                        if (!VideoRepair.needsRepair(getApplication(), video.localPath)) {
+                            alreadyPlayable++
+                            return@forEachIndexed
+                        }
+                        val prepared = VideoRepair.prepare(
+                            getApplication(), video.localPath, video.id
+                        ) { percent ->
+                            repairProgress.value = RepairProgress(
+                                video.id, video.title, index + 1, candidates.size, percent
+                            )
+                        }
+                        if (prepared == video.localPath) alreadyPlayable++ else repaired++
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        failed++
+                    }
+                }
+            } catch (_: CancellationException) {
+                cancelled = true
+            } finally {
+                repairProgress.value = null
+                _repairResults.tryEmit(RepairResult(repaired, alreadyPlayable, failed, cancelled))
+                repairJob = null
+            }
+        }
+    }
+
+    fun cancelRepair() {
+        repairJob?.cancel()
+    }
 
     fun folderName(id: Long?): String? =
         id?.let { folders.value.firstOrNull { f -> f.id == it }?.name }

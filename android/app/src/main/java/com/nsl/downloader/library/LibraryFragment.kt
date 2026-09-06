@@ -70,6 +70,8 @@ class LibraryFragment : Fragment() {
         binding.btnCloseSelection.setOnClickListener { viewModel.clearSelection() }
         binding.btnSelectAll.setOnClickListener { viewModel.selectAll() }
         binding.btnMoveSelected.setOnClickListener { promptMoveSelection() }
+        binding.btnRepairSelected.setOnClickListener { confirmRepairSelection() }
+        binding.btnCancelRepair.setOnClickListener { viewModel.cancelRepair() }
 
         requireActivity().onBackPressedDispatcher
             .addCallback(viewLifecycleOwner, backCallback)
@@ -94,6 +96,14 @@ class LibraryFragment : Fragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             DownloadQueueBus.state.collectLatest { showBatchBanner(it.firstOrNull()) }
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.repairProgress.collectLatest { showRepairProgress(it) }
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewModel.repairResults.collectLatest { showRepairResult(it) }
         }
     }
 
@@ -238,6 +248,41 @@ class LibraryFragment : Fragment() {
             viewModel.selectedVideos.singleOrNull()?.let { showItemActions(it) }
         }
         binding.btnSelectAll.isEnabled = count < viewModel.selectableCount()
+        binding.btnRepairSelected.isEnabled = viewModel.selectedVideos.any { it.canRepair }
+    }
+
+    private fun confirmRepairSelection() {
+        val videos = viewModel.selectedVideos.filter { it.canRepair }
+        if (videos.isEmpty()) return
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle(resources.getQuantityString(R.plurals.library_repair_title, videos.size, videos.size))
+            .setMessage(resources.getQuantityString(R.plurals.library_repair_message, videos.size, videos.size))
+            .setPositiveButton(R.string.library_repair) { _, _ -> viewModel.repairVideos(videos) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showRepairProgress(progress: RepairProgress?) {
+        binding.repairBanner.visibility = if (progress == null) View.GONE else View.VISIBLE
+        if (progress == null) return
+        binding.repairText.text = getString(
+            R.string.library_repair_progress,
+            progress.current, progress.total, progress.title, progress.percent
+        )
+        binding.repairProgress.progress = progress.percent
+    }
+
+    private fun showRepairResult(result: RepairResult) {
+        if (!isAdded) return
+        val message = if (result.cancelled) {
+            getString(R.string.library_repair_cancelled, result.repaired)
+        } else {
+            getString(
+                R.string.library_repair_finished,
+                result.repaired, result.alreadyPlayable, result.failed
+            )
+        }
+        Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show()
     }
 
     /** Move for the whole selection; single moves go through [promptMove]. */
@@ -323,6 +368,10 @@ class LibraryFragment : Fragment() {
         } else {
             listOf<Pair<String, () -> Unit>>(
                 getString(R.string.library_play) to { openPlayer(video) },
+                getString(R.string.library_repair) to {
+                    viewModel.clearSelection()
+                    viewModel.repairVideos(listOf(video))
+                },
                 getString(R.string.library_move_to) to { promptMove(video) },
                 getString(R.string.library_share) to { shareVideo(video) },
                 getString(R.string.remove) to { confirmDeleteSingle(video) }
