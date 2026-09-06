@@ -1,5 +1,7 @@
 package com.nsl.downloader.service
 
+import android.content.Context
+import android.net.Uri
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -29,26 +31,54 @@ object Mp4Muxer {
         output: File,
         onProgress: (Int) -> Unit = {},
         checkCancelled: () -> Unit = {}
+    ): Boolean = muxSources(
+        { it.setDataSource(videoFile.absolutePath) },
+        { it.setDataSource(audioFile.absolutePath) }, output, onProgress, checkCancelled)
+
+    fun repair(context: Context, source: Uri, output: File,
+        onProgress: (Int) -> Unit = {}, checkCancelled: () -> Unit = {}): Boolean = muxSources(
+        { it.setDataSource(context, source, null) },
+        { it.setDataSource(context, source, null) }, output, onProgress, checkCancelled)
+
+    fun needsAudioRepair(context: Context, source: Uri): Boolean {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(context, source, null)
+            val track = selectTrack(extractor, "audio/") ?: return false
+            val format = extractor.getTrackFormat(track)
+            if (format.getString(MediaFormat.KEY_MIME) != "audio/mp4a-latm") return false
+            val buffer = ByteBuffer.allocate(maxOf(maxInputSize(format), DEFAULT_BUFFER_BYTES))
+            val size = extractor.readSampleData(buffer, 0)
+            size > 0 && AdtsSamples.split(buffer, size) != null
+        } finally { extractor.release() }
+    }
+
+    private fun muxSources(
+        setVideoSource: (MediaExtractor) -> Unit,
+        setAudioSource: (MediaExtractor) -> Unit,
+        output: File, onProgress: (Int) -> Unit, checkCancelled: () -> Unit
     ): Boolean {
         var muxer: MediaMuxer? = null
         val videoExtractor = MediaExtractor()
         val audioExtractor = MediaExtractor()
-        var started = false
+        var complete = false
 
         try {
-            videoExtractor.setDataSource(videoFile.absolutePath)
-            audioExtractor.setDataSource(audioFile.absolutePath)
+            setVideoSource(videoExtractor)
+            setAudioSource(audioExtractor)
 
             val videoTrack = selectTrack(videoExtractor, "video/") ?: return false
             val audioTrack = selectTrack(audioExtractor, "audio/") ?: return false
             val videoFormat = videoExtractor.getTrackFormat(videoTrack)
             val audioFormat = audioExtractor.getTrackFormat(audioTrack)
+            // TS extractors can return several ADTS frames in one sample. The
+            // MP4 track must contain individual AAC access units without ADTS.
+            audioFormat.setInteger(MediaFormat.KEY_IS_ADTS, 0)
 
             muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val outVideo = muxer.addTrack(videoFormat)
             val outAudio = muxer.addTrack(audioFormat)
             muxer.start()
-            started = true
 
             val bufferSize = maxOf(
                 maxInputSize(videoFormat), maxInputSize(audioFormat), DEFAULT_BUFFER_BYTES
@@ -59,18 +89,20 @@ object Mp4Muxer {
             copyTrack(audioExtractor, audioFormat, muxer, outAudio, buffer, 70, 100,
                 onProgress, checkCancelled)
             checkCancelled()
-            return true
+            // stop() writes the MP4 sample tables. A failure here must not be
+            // reported as a completed download with an unplayable container.
+            muxer.stop()
+            complete = output.length() > 0
+            return complete
         } catch (e: CancellationException) {
-            output.delete()
             throw e
         } catch (e: Exception) {
-            output.delete()
             return false
         } finally {
-            if (started) runCatching { muxer?.stop() }
             runCatching { muxer?.release() }
             runCatching { videoExtractor.release() }
             runCatching { audioExtractor.release() }
+            if (!complete) output.delete()
         }
     }
 
@@ -125,11 +157,24 @@ object Mp4Muxer {
             buffer.clear()
             val size = extractor.readSampleData(buffer, 0)
             if (size < 0) break
-            info.offset = 0
-            info.size = size
-            info.presentationTimeUs = extractor.sampleTime
-            info.flags = sampleFlagsToBufferFlags(extractor.sampleFlags)
-            muxer.writeSampleData(outputTrack, buffer, info)
+            val aacFrames = if (format.getString(MediaFormat.KEY_MIME) == "audio/mp4a-latm") {
+                AdtsSamples.split(buffer, size)
+            } else null
+            if (aacFrames != null) {
+                for (frame in aacFrames) {
+                    info.offset = frame.offset
+                    info.size = frame.size
+                    info.presentationTimeUs = extractor.sampleTime + frame.timeOffsetUs
+                    info.flags = MediaCodec.BUFFER_FLAG_KEY_FRAME
+                    muxer.writeSampleData(outputTrack, buffer, info)
+                }
+            } else {
+                info.offset = 0
+                info.size = size
+                info.presentationTimeUs = extractor.sampleTime
+                info.flags = sampleFlagsToBufferFlags(extractor.sampleFlags)
+                muxer.writeSampleData(outputTrack, buffer, info)
+            }
             report(info.presentationTimeUs)
             // Some device extractors keep exposing the final sample after
             // advance() returns false. Respecting its result prevents an

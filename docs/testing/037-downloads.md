@@ -1,5 +1,7 @@
 # 037 movie downloading
 
+> **Superseded playback validation (2026-09-06):** The original outputs below contain bundled ADTS audio inside MP4. The earlier metadata/FFmpeg checks missed a real ExoPlayer stall. See [the playback fix and actual-player verification](037-playback-fix.md). Original `/tmp/.../android.mp4` files are retained only as regression inputs.
+
 Test date: 2026-09-05 (Asia/Bangkok).
 
 Open a movie detail page at https://www.037hddmovies.com/ in NSL, tap **Download**, and select **Thai Player** or **Soundtrack Player** when offered. The download resolves the public LeoPlayer configuration and tries its alternate servers. Playback does not need to start first. When the HLS master supplies separate audio, NSL saves an MP4 containing both video and audio.
@@ -36,7 +38,7 @@ All three complete movies also passed `MoviePipelineTest` on Android 15 (API 35,
 | The Runner | 1,033,964,156 | 5150.741 seconds |
 | The Whisper Man | 594,268,930 | 6828.715 seconds |
 
-Machine-readable evidence: `037-android-results.json`. Complete playable MP4 copies are at `/tmp/nsl-movie-downloads/movie-1/android.mp4`, `movie-2/android.mp4`, and `movie-3/android.mp4`.
+Machine-readable evidence: `037-android-results.json`. Original defective MP4 regression inputs are at `/tmp/nsl-movie-downloads/movie-1/android.mp4`, `movie-2/android.mp4`, and `movie-3/android.mp4`.
 
 ## Reproduce
 

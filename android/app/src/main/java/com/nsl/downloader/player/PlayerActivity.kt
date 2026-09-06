@@ -16,6 +16,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
+import androidx.lifecycle.Lifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.DefaultTimeBar
 import androidx.media3.ui.TimeBar
@@ -25,6 +27,7 @@ import com.nsl.downloader.databinding.ActivityPlayerBinding
 import com.nsl.downloader.util.MediaStorage
 import com.nsl.downloader.util.Prefs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -48,6 +51,8 @@ class PlayerActivity : AppCompatActivity() {
     private var videoPath: String? = null
     private var thumbnailJob: Job? = null
     private var pictureInPictureEntryPending = false
+    private var resumePlayback = true
+    private var privateRepairCopy: java.io.File? = null
     private val prefs by lazy { Prefs(this) }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -66,10 +71,35 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
-        setupPlayer(videoPath!!)
         setupGestures()
         setupButtons(title)
         setupThumbnailPreview()
+        prepareVideo(videoPath!!)
+    }
+
+    private fun prepareVideo(path: String) {
+        lifecycleScope.launch {
+            try {
+                val prepared = VideoRepair.prepare(applicationContext, path, videoId) { percent ->
+                    runOnUiThread { binding.playerView.setCustomErrorMessage("Repairing video… $percent%") }
+                }
+                videoPath = prepared
+                if (prepared != path) {
+                    if (prepared.startsWith("${cacheDir.absolutePath}/audio-repair-")) {
+                        privateRepairCopy = java.io.File(prepared)
+                    } else {
+                        Toast.makeText(this@PlayerActivity, "Repaired copy saved to your Library", Toast.LENGTH_LONG).show()
+                    }
+                }
+                binding.playerView.setCustomErrorMessage(null)
+                setupPlayer(prepared)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("NSLPlayer", "Unable to prepare downloaded video", e)
+                binding.playerView.setCustomErrorMessage("Unable to open or repair this video. Check free storage or download it again.")
+            }
+        }
     }
 
     private fun setupPlayer(path: String) {
@@ -78,8 +108,12 @@ class PlayerActivity : AppCompatActivity() {
             val item = MediaItem.fromUri(MediaStorage.toUri(path))
             exo.setMediaItem(item)
             exo.prepare()
-            exo.playWhenReady = true
+            exo.playWhenReady = resumePlayback && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             exo.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    android.util.Log.e("NSLPlayer", "Playback failed: ${error.errorCodeName}", error)
+                    binding.playerView.setCustomErrorMessage("Unable to play this file (${error.errorCodeName}).")
+                }
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) {
                         binding.playerView.showController()
@@ -254,8 +288,14 @@ class PlayerActivity : AppCompatActivity() {
         if (isInPictureInPictureMode) binding.playerView.hideController()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (resumePlayback) player?.play()
+    }
+
     override fun onPause() {
         super.onPause()
+        resumePlayback = player?.playWhenReady ?: resumePlayback
         val pos = player?.currentPosition ?: 0L
         savePosition(pos)
         // In PiP the activity is paused but the window is still on screen, so
@@ -282,5 +322,6 @@ class PlayerActivity : AppCompatActivity() {
         thumbnailJob?.cancel()
         player?.release()
         player = null
+        privateRepairCopy?.delete()
     }
 }

@@ -65,6 +65,15 @@ object MediaStorage {
         name.replace(Regex("[\\\\/:*?\"<>|\\r\\n\\t]"), "_").trim().take(80)
             .ifBlank { "video_${System.currentTimeMillis()}" }
 
+    /** The length limit must not remove .mp4/.mp3 from a long movie title. */
+    fun sanitizeFileName(name: String): String {
+        val extension = name.substringAfterLast('.', "")
+            .takeIf { it.length in 2..5 && it.all(Char::isLetterOrDigit) }
+            ?: return sanitizeName(name)
+        val suffix = ".$extension"
+        return sanitizeName(name.substringBeforeLast('.')).take(80 - suffix.length) + suffix
+    }
+
     /** e.g. `Download/NSL Downloader/Music videos` */
     fun relativeDir(folder: String?): String {
         val base = "${Environment.DIRECTORY_DOWNLOADS}/$root"
@@ -286,7 +295,7 @@ object MediaStorage {
         val resolver = context.contentResolver
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, sanitizeName(displayName))
+            put(MediaStore.MediaColumns.DISPLAY_NAME, sanitizeFileName(displayName))
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
             put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir(folder))
             put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -313,7 +322,7 @@ object MediaStorage {
         folder: String?
     ): String? = runCatching {
         val dir = legacyDir(folder).also { it.mkdirs() }
-        val target = uniqueFile(dir, sanitizeName(displayName))
+        val target = uniqueFile(dir, sanitizeFileName(displayName))
         source.inputStream().use { input ->
             target.outputStream().use { input.copyTo(it, 1 shl 16) }
         }
@@ -398,7 +407,8 @@ object MediaStorage {
     fun isContentUri(location: String): Boolean = location.startsWith("content://")
 
     fun toUri(location: String): Uri =
-        if (isContentUri(location)) Uri.parse(location) else Uri.fromFile(File(location))
+        if (isContentUri(location) || location.startsWith("file:")) Uri.parse(location)
+        else Uri.fromFile(File(location))
 
     fun exists(context: Context, location: String): Boolean = when {
         location.isBlank() -> false
