@@ -143,3 +143,5 @@ vite.config.ts.timestamp-*
 .vite/
 
 /android
+# Live movie download test artifacts
+/test-results/

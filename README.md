@@ -187,3 +187,30 @@ Log in to YouTube inside the app. The session is stored in a separate browser pa
 **App is slow or uses too much memory**
 
 Electron bundles a full Chromium engine — ~300 MB on disk and ~200 MB RAM idle is normal. This is the trade-off for having a real embedded browser.
+
+## 037HDDMovies on macOS
+
+Open a movie page on `https://www.037hddmovies.com/`, start the embedded player,
+then use its skip-ad controls when available. Once the movie loads, the sidebar
+shows **HLS**. Choose **Download**, select a quality, and keep **MP4** for the
+built-in player. Both the video and its separate audio track are downloaded.
+
+The app recognizes this site's extensionless StreamHLS master playlists, keeps
+embedded-player request headers, and ignores the site's known preroll video
+hosts. Its StreamHLS merge step handles PNG-prefixed transport-stream fragments.
+Other providers retain their usual FFmpeg input detection. Failed downloads and
+missing fragments are reported as failures instead of appearing in Done.
+
+### Verification
+
+```bash
+npm test       # offline detection and download-completion regression tests
+npm run test:037  # three complete live movie downloads, then decode and playback
+```
+
+The live test uses an isolated browser profile, keeping the app hidden except
+for a brief playback check that does not take keyboard focus. It downloads
+three full movies into `test-results/037/`, checks video and audio with FFprobe,
+decodes the entire files with FFmpeg, and checks that playback advances in the
+app's own player. Results are saved in `test-results/037/report.json`. It requires
+network access, installed yt-dlp/FFmpeg/FFprobe, and several GB of free disk space.

@@ -6,6 +6,9 @@ const path = require('path')
 const { spawn, spawnSync } = require('child_process')
 const fs = require('fs')
 const os = require('os')
+const { randomUUID } = require('crypto')
+const { isStreamHlsMaster, is037Page, isKnownVideoAd, selectStream, requestHeaderArgs, streamDownloadArgs, lineReader } = require('./src/stream-support')
+const BROWSER_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
 
 // ---------------------------------------------------------------------------
 // Settings store (falls back to simple JSON if electron-store not installed)
@@ -710,13 +713,7 @@ function createBrowserTab(url) {
       setTimeout(async () => {
         if (!view.webContents || view.webContents.isDestroyed()) return
         try {
-          const found = await view.webContents.executeJavaScript(PLAYER_DETECT_SCRIPT)
-          if (!Array.isArray(found) || !found.length) return
-          const currentUrl = view.webContents.getURL()
-          const currentTitle = view.webContents.getTitle()
-          for (const u of found) {
-            recordDetection(currentUrl, currentTitle, classifyRequest(u, '') || 'Video', u)
-          }
+          await scanPlayerFrames(view)
         } catch {}
       }, delay)
     })
@@ -812,7 +809,21 @@ function repositionBrowserView() {
 function setupVideoInterception() {
   const browserSession = session.fromPartition('persist:browser')
 
+  const requestHeaders = new Map()
+  browserSession.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
+    // Store only the headers needed by media requests, scoped to request lifetime.
+    const headers = {}
+    for (const [key, value] of Object.entries(details.requestHeaders || {})) {
+      if (['referer', 'origin', 'user-agent'].includes(key.toLowerCase())) headers[key.toLowerCase()] = value
+    }
+    requestHeaders.set(details.id, headers)
+    callback({ requestHeaders: details.requestHeaders })
+  })
+  browserSession.webRequest.onErrorOccurred(details => requestHeaders.delete(details.id))
   browserSession.webRequest.onCompleted({ urls: ['*://*/*'] }, (details) => {
+    const headers = requestHeaders.get(details.id) || {}
+    requestHeaders.delete(details.id)
+    if (details.statusCode < 200 || details.statusCode >= 400) return
     // Find which tab made the request
     let requestingTabId = null
     let requestingView = null
@@ -837,7 +848,7 @@ function setupVideoInterception() {
     const pageURL = requestingView.webContents.getURL()
     const pageTitle = requestingView.webContents.getTitle()
     
-    recordDetection(pageURL, pageTitle, type, url)
+    recordDetection(pageURL, pageTitle, type, url, headers)
   })
 }
 
@@ -847,6 +858,7 @@ function classifyRequest(url, contentType) {
   // Skip TS segments (individual chunks, not the manifest)
   if (url.match(/\/seg[-_]?\d+\.ts(\?|$)/i) || url.match(/[_-]\d{4,}\.ts(\?|$)/i)) return null
 
+  if (isStreamHlsMaster(url)) return 'HLS'
   const normType = (contentType || '').toLowerCase()
 
   if (url.match(/\.m3u8(\?|$)/i) || normType.includes('mpegurl') || normType.includes('x-mpegurl')) return 'HLS'
@@ -862,31 +874,26 @@ function classifyRequest(url, contentType) {
   return null
 }
 
-function recordDetection(pageURL, pageTitle, type, streamUrl = null) {
+function recordDetection(pageURL, pageTitle, type, streamUrl = null, headers = {}) {
   if (!pageURL || pageURL === 'about:blank' || pageURL.startsWith('devtools://')) return
 
+  if (streamUrl && !/^https?:\/\//i.test(streamUrl)) return
+  if (is037Page(pageURL) && isKnownVideoAd(streamUrl)) return
   const existing = detectedByPage.get(pageURL)
+  const candidate = streamUrl ? { url: streamUrl, type, headers } : null
+  let selected = selectStream(existing?.stream, candidate)
+  // Preserve canonical VK extraction rather than a transient CDN URL.
+  if (streamUrl && /^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/.test(normalizeVKUrl(streamUrl))) selected = candidate
   if (existing) {
-    if (streamUrl && (type === 'HLS' || type === 'DASH' || type === 'Video')) {
-      if (!existing.streamUrl) {
-        existing.streamUrl = streamUrl
-      } else {
-        const newIsVK = normalizeVKUrl(streamUrl).match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)
-        const oldIsVK = normalizeVKUrl(existing.streamUrl).match(/^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/)
-        if (newIsVK && !oldIsVK) {
-          existing.streamUrl = streamUrl
-        }
-      }
-    }
-    if (existing.types.has(type)) return // already know this type for this page
+    const changed = selected?.url !== existing.streamUrl
+    existing.stream = selected
+    existing.streamUrl = selected?.url || null
+    if (existing.types.has(type) && !changed) return
     existing.types.add(type)
   } else {
     detectedByPage.set(pageURL, {
-      pageURL, pageTitle,
-      favicon: null,
-      types: new Set([type]),
-      timestamp: Date.now(),
-      streamUrl: streamUrl || null
+      pageURL, pageTitle, favicon: null, types: new Set([type]),
+      timestamp: Date.now(), stream: selected, streamUrl: selected?.url || null
     })
   }
 
@@ -895,6 +902,24 @@ function recordDetection(pageURL, pageTitle, type, streamUrl = null) {
     pageTitle,
     types: [...(detectedByPage.get(pageURL)?.types || [type])]
   })
+}
+
+async function scanPlayerFrames(view) {
+  const pageURL = view.webContents.getURL()
+  const pageTitle = view.webContents.getTitle()
+  await Promise.allSettled(view.webContents.mainFrame.framesInSubtree.map(async frame => {
+    const found = await frame.executeJavaScript(PLAYER_DETECT_SCRIPT)
+    if (view.webContents.isDestroyed() || view.webContents.getURL() !== pageURL) return
+    for (const url of Array.isArray(found) ? found : []) {
+      const current = detectedByPage.get(pageURL)?.stream
+      const headers = current?.url === url ? current.headers : { referer: frame.url }
+      recordDetection(pageURL, pageTitle, classifyRequest(url, '') || 'Video', url, headers)
+    }
+  }))
+}
+
+function getMediaHeaderArgs(pageURL, targetURL, pageData) {
+  return requestHeaderArgs(pageURL, targetURL, pageData?.stream?.headers, session.fromPartition('persist:browser').getUserAgent() || BROWSER_USER_AGENT)
 }
 
 async function scanDOMForVideos() {
@@ -998,7 +1023,9 @@ async function scanDOMForVideos() {
     `)
     for (const src of found) {
       const type = classifyRequest(src, '')
-      recordDetection(pageURL, pageTitle, type || 'Video', src)
+      if (type || /^https?:\/\/vk\.com\/(video[-\d_]+|video_ext\.php)/.test(normalizeVKUrl(src))) {
+        recordDetection(pageURL, pageTitle, type || 'Video', src)
+      }
     }
   } catch { /* cross-origin or CSP blocked */ }
 }
@@ -1070,11 +1097,9 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     const pageData = detectedByPage.get(pageURL)
     const targetUrl = getTargetUrl(pageURL, pageData && pageData.streamUrl ? pageData.streamUrl : null)
 
-    const args = ['--dump-json', '--no-playlist', '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36']
+    const args = ['--dump-json', '--no-playlist', ...getMediaHeaderArgs(pageURL, targetUrl, pageData)]
     if (cookiesPath) args.push('--cookies', cookiesPath)
-    if (targetUrl !== pageURL) {
-      args.push('--add-header', `Referer: ${pageURL}`)
-    }
+
     args.push(targetUrl)
 
     const proc = spawn(bin, args)
@@ -1084,7 +1109,11 @@ ipcMain.handle('ytdlp:metadata', async (_, pageURL) => {
     proc.on('close', async code => {
       const line = out.split('\n').find(l => l.trim().startsWith('{'))
       if (line) {
-        try { resolve(JSON.parse(line)); return }
+        try {
+          const metadata = JSON.parse(line)
+          if (is037Page(pageURL)) metadata.title = pageData?.pageTitle || metadata.title
+          resolve(metadata); return
+        }
         catch {}
       }
       // yt-dlp failed — check if the page has an MSE player running (P2P / proprietary stream)
@@ -1140,14 +1169,11 @@ ipcMain.handle('ytdlp:extractAudio', async (_, { pageURL, audioFormat, title, fi
       '--ffmpeg-location', path.dirname(findBinary('ffmpeg')),
       '--output', outTpl,
       '--newline', '--no-overwrites',
-      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      ...getMediaHeaderArgs(pageURL, targetUrl, pageData),
       ...getDownloadSpeedArgs()
     ]
     if (cookiesPath) a.push('--cookies', cookiesPath)
-    if (targetUrl !== pageURL) {
-      a.push('--add-header', `Referer: ${pageURL}`)
-      try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
-    }
+
     a.push(targetUrl)
     return a
   }
@@ -1277,10 +1303,10 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     return id
   }
 
-  // Use a collision-safe numeric temp path so FFmpeg never touches user-supplied
+  // Use a collision-safe temporary path so FFmpeg never touches user-supplied
   // strings (avoids "Invalid argument" from special chars or long titles).
   // After success we rename to the friendly title.
-  const tempBase = path.join(saveFolder, `nsl_dl_${id}`)
+  const tempBase = path.join(saveFolder, `nsl_dl_${randomUUID()}`)
   const tempTemplate = `${tempBase}.%(ext)s`
 
   const bin = findBinary('yt-dlp')
@@ -1295,18 +1321,19 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     const a = [
       '--format', fmt,
       '--merge-output-format', outFmt,
+      '--remux-video', outFmt,
+      ...streamDownloadArgs(targetUrl),
+      '--abort-on-unavailable-fragments',
+      '--print', 'after_move:NSL_FILE:%(filepath)j',
       '--output', tempTemplate,
       '--newline', '--no-playlist', '--progress', '--no-overwrites',
-      '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      ...getMediaHeaderArgs(pageURL, targetUrl, pageData),
       ...getDownloadSpeedArgs()
     ]
     if (attempt === 2) a.push('--postprocessor-args', 'ffmpeg:-strict experimental')
     if (path.isAbsolute(ffmpegBin)) a.push('--ffmpeg-location', path.dirname(ffmpegBin))
     if (cookiesPath) a.push('--cookies', cookiesPath)
-    if (targetUrl !== pageURL) {
-      a.push('--add-header', `Referer: ${pageURL}`)
-      try { a.push('--add-header', `Origin: ${new URL(pageURL).origin}`) } catch {}
-    }
+
     a.push(targetUrl)
     return a
   }
@@ -1315,6 +1342,11 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
   let allStderr = ''
 
   function notifyDone() {
+    if (!capturedFilePath || !fs.existsSync(capturedFilePath) || fs.statSync(capturedFilePath).size === 0) {
+      allStderr = 'Download finished without a playable output file.'
+      notifyFailed()
+      return
+    }
     let finalPath = capturedFilePath
     if (capturedFilePath && fs.existsSync(capturedFilePath)) {
       const ext = path.extname(capturedFilePath)
@@ -1346,14 +1378,15 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     const proc = spawn(bin, buildArgs(attempt))
     activeDownloads.set(id, { procs: [proc], pageURL, title })
 
-    proc.stdout.on('data', data => {
-      for (const line of data.toString().split('\n')) {
-        const fp = parseFilePath(line)
-        if (fp) capturedFilePath = fp
-        const p = parseYTDLPLine(line)
-        if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
+    const output = lineReader(line => {
+      if (line.startsWith('NSL_FILE:')) {
+        try { capturedFilePath = JSON.parse(line.slice(9)) } catch {}
       }
+      const p = parseYTDLPLine(line)
+      if (p) mainWindow?.webContents.send('download:progress', { id, ...p })
     })
+    proc.stdout.setEncoding('utf8')
+    proc.stdout.on('data', chunk => output.push(chunk))
 
     proc.stderr.on('data', data => {
       const msg = data.toString().trim()
@@ -1364,10 +1397,9 @@ ipcMain.handle('ytdlp:download', async (_, { pageURL, formatSelector, title, fil
     })
 
     proc.on('close', code => {
+      output.end()
       activeDownloads.delete(id)
       if (code === 0) {
-        notifyDone()
-      } else if (capturedFilePath && fs.existsSync(capturedFilePath) && fs.statSync(capturedFilePath).size > 0) {
         notifyDone()
       } else if (allStderr.toLowerCase().includes('error opening output files') || allStderr.toLowerCase().includes('invalid argument')) {
         if (attempt < 2) {

@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --mac",
-    "build:universal": "electron-builder --mac --universal"
+    "build:universal": "electron-builder --mac --universal",
+    "test": "node --test test/*.test.cjs",
+    "test:037": "electron scripts/test-037.cjs"
   },
   "dependencies": {
     "electron-store": "^8.2.0"
