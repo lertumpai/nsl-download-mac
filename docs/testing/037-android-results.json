@@ -1,0 +1,83 @@
+{
+  "testedAt": "2026-09-05",
+  "device": "Android 15 API 35 arm64 emulator",
+  "instrumentationResult": "OK (1 test), three complete movie pipelines",
+  "elapsedSeconds": 1497.216,
+  "movies": [
+    {
+      "page": "https://www.037hddmovies.com/2026/09/02/mobile-suit-gundam-hathaway-the-sorcery-of-nymph-circe-2026/",
+      "mp4Bytes": 782635113,
+      "durationSeconds": 6457.258667,
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 1280,
+          "height": 720,
+          "duration": "6456.783867"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "duration": "6457.258667"
+        }
+      ],
+      "decodedSamples": [
+        "start",
+        "middle",
+        "end"
+      ],
+      "file": "/tmp/nsl-movie-downloads/movie-1/android.mp4"
+    },
+    {
+      "page": "https://www.037hddmovies.com/2026/09/05/the-runner-2026-%e0%b9%80%e0%b8%94%e0%b8%ad%e0%b8%b0%e0%b8%a3%e0%b8%b1%e0%b8%99%e0%b9%80%e0%b8%99%e0%b8%ad%e0%b8%a3%e0%b9%8c/",
+      "mp4Bytes": 1033964156,
+      "durationSeconds": 5150.741333,
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 1280,
+          "height": 720,
+          "duration": "5150.541867"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "duration": "5150.741333"
+        }
+      ],
+      "decodedSamples": [
+        "start",
+        "middle",
+        "end"
+      ],
+      "file": "/tmp/nsl-movie-downloads/movie-2/android.mp4"
+    },
+    {
+      "page": "https://www.037hddmovies.com/2026/09/02/the-whisper-man-2026-%e0%b9%80%e0%b8%aa%e0%b8%b5%e0%b8%a2%e0%b8%87%e0%b8%81%e0%b8%a3%e0%b8%b0%e0%b8%8b%e0%b8%b4%e0%b8%9a/",
+      "mp4Bytes": 594268930,
+      "durationSeconds": 6828.714667,
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 1280,
+          "height": 720,
+          "duration": "6828.375200"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "duration": "6828.714667"
+        }
+      ],
+      "decodedSamples": [
+        "start",
+        "middle",
+        "end"
+      ],
+      "file": "/tmp/nsl-movie-downloads/movie-3/android.mp4"
+    }
+  ]
+}

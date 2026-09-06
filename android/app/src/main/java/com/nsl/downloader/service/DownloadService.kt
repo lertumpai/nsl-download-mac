@@ -807,6 +807,11 @@ class DownloadService : Service() {
     ): Produced? {
         val sanitized = MediaStorage.sanitizeName(task.title)
         val videoType = detectVideoType(task.url)
+        if (videoType == VideoType.HLS) {
+            val file = HlsMovieDownloader(hlsDownloader)
+                .download(task.url, workDir(id), task.headers, report) ?: return null
+            return Produced(file, "$sanitized.${file.extension}", mimeForExtension(file.extension), file.length())
+        }
         val extension = when (videoType) {
             // The native HLS downloader concatenates transport-stream segments.
             VideoType.HLS -> "ts"

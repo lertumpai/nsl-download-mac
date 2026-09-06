@@ -1,0 +1,32 @@
+{
+  "testedAt": "2026-09-05",
+  "fullMovieTransfers": [
+    {
+      "page": "https://www.037hddmovies.com/2026/09/02/mobile-suit-gundam-hathaway-the-sorcery-of-nymph-circe-2026/",
+      "status": "complete",
+      "resolution": "1280x720",
+      "videoBytes": 709568212,
+      "audioBytes": 111615036,
+      "durationSeconds": 6456.825367,
+      "expectedDurationSeconds": 6456.825497000003
+    },
+    {
+      "page": "https://www.037hddmovies.com/2026/09/05/the-runner-2026-%e0%b9%80%e0%b8%94%e0%b8%ad%e0%b8%b0%e0%b8%a3%e0%b8%b1%e0%b8%99%e0%b9%80%e0%b8%99%e0%b8%ad%e0%b8%a3%e0%b9%8c/",
+      "status": "complete",
+      "resolution": "1280x720",
+      "videoBytes": 985923700,
+      "audioBytes": 88240244,
+      "durationSeconds": 5150.583333,
+      "expectedDurationSeconds": 5150.583368000017
+    },
+    {
+      "page": "https://www.037hddmovies.com/2026/09/02/the-whisper-man-2026-%e0%b9%80%e0%b8%aa%e0%b8%b5%e0%b8%a2%e0%b8%87%e0%b8%81%e0%b8%a3%e0%b8%b0%e0%b8%8b%e0%b8%b4%e0%b8%9a/",
+      "status": "complete",
+      "resolution": "1280x720",
+      "videoBytes": 513255980,
+      "audioBytes": 117295456,
+      "durationSeconds": 6828.416667,
+      "expectedDurationSeconds": 6828.416703000032
+    }
+  ]
+}

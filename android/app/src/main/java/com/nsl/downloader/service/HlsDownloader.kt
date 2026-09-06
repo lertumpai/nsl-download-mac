@@ -5,9 +5,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.io.IOException
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.net.URI
@@ -42,7 +44,8 @@ class HlsDownloader(private val client: OkHttpClient) {
         val url: String,
         val width: Int,
         val height: Int,
-        val bandwidth: Long
+        val bandwidth: Long,
+        val audioUrl: String? = null
     )
 
     /**
@@ -59,6 +62,7 @@ class HlsDownloader(private val client: OkHttpClient) {
             return listOf(Variant(playlistUrl, 0, 0, 0))
         }
         val lines = text.lines()
+        val audioGroups = lines.filter { it.startsWith("#EXT-X-MEDIA:") && it.contains("TYPE=AUDIO") }
         val variants = mutableListOf<Variant>()
         var i = 0
         while (i < lines.size) {
@@ -70,7 +74,12 @@ class HlsDownloader(private val client: OkHttpClient) {
                 val h = res?.groupValues?.get(2)?.toIntOrNull() ?: 0
                 val uri = lines.getOrNull(i + 1)?.trim()
                 if (!uri.isNullOrEmpty() && !uri.startsWith("#")) {
-                    variants.add(Variant(resolveUrl(playlistUrl, uri), w, h, bw))
+                    val group = attribute(line, "AUDIO")
+                    val audio = audioGroups.filter { attribute(it, "GROUP-ID") == group }
+                        .sortedByDescending { it.contains("DEFAULT=YES") }
+                        .firstNotNullOfOrNull { attribute(it, "URI") }
+                    variants.add(Variant(resolveUrl(playlistUrl, uri), w, h, bw,
+                        audio?.let { resolveUrl(playlistUrl, it) }))
                 }
                 i += 2
             } else i++
@@ -120,7 +129,8 @@ class HlsDownloader(private val client: OkHttpClient) {
                 val fetched = batch.map { seg ->
                     async(Dispatchers.IO) {
                         val data = fetchSegment(seg.url, headers) ?: return@async null
-                        if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
+                        val decoded = if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
+                        unwrapSegment(decoded)
                     }
                 }.awaitAll()
 
@@ -202,18 +212,27 @@ class HlsDownloader(private val client: OkHttpClient) {
      * cancelled instead of running the segment to completion first.
      */
     private suspend fun fetchSegment(url: String, headers: Map<String, String>): ByteArray? =
-        try {
-            useCall(client.newCall(buildRequest(url, headers))) { r ->
-                if (!r.isSuccessful) null else r.body?.bytes()
+        run {
+            repeat(3) { attempt ->
+                try {
+                    val bytes = useCall(client.newCall(buildRequest(url, headers))) { r ->
+                        if (!r.isSuccessful) null else r.body?.bytes()
+                    }
+                    if (bytes != null && bytes.isNotEmpty()) return@run bytes
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: IOException) { }
+                if (attempt < 2) delay(500L * (attempt + 1))
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
             null
         }
 
     private fun parseMediaPlaylist(mediaUrl: String, headers: Map<String, String>): List<Segment>? {
         val text = fetchText(mediaUrl, headers) ?: return null
+        if (!text.trimStart().startsWith("#EXTM3U")) return null
+        // This downloader writes TS/ADTS. Refuse unsupported layouts rather than
+        // publishing initialization-free fMP4 or encrypted bytes as a finished movie.
+        if (text.contains("#EXT-X-MAP") || text.contains("#EXT-X-BYTERANGE")) return null
         val lines = text.lines()
         val segments = mutableListOf<Segment>()
 
@@ -237,10 +256,11 @@ class HlsDownloader(private val client: OkHttpClient) {
                     } else if (method == "AES-128") {
                         val keyUri = Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)
                         currentKey = keyUri?.let { fetchBytes(resolveUrl(mediaUrl, it), headers) }
+                        if (currentKey?.size != 16) return null
                         val ivHex = Regex("IV=0x([0-9A-Fa-f]+)").find(line)?.groupValues?.get(1)
                         currentIv = ivHex?.let { hexToBytes(it) }
                     }
-                    // SAMPLE-AES and others: unsupported, leave key null (segment kept raw)
+                    else return null
                 }
                 line.isNotEmpty() && !line.startsWith("#") -> {
                     segments.add(
@@ -286,5 +306,29 @@ class HlsDownloader(private val client: OkHttpClient) {
         return ByteArray(clean.length / 2) { i ->
             clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
         }
+    }
+
+    private fun attribute(line: String, name: String): String? =
+        Regex("(?:^|[:,])$name=\"([^\"]*)\"").find(line)?.groupValues?.get(1)
+
+    /** Some CDNs prepend a small PNG to TS segments served under .jpg URLs. */
+    internal fun unwrapSegment(bytes: ByteArray): ByteArray {
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 13, 10, 26, 10)
+        if (!bytes.take(8).toByteArray().contentEquals(png)) return bytes
+        // Validate the PNG chunk boundary, then require several MPEG-TS sync bytes.
+        var offset = 8
+        while (offset + 12 <= bytes.size && offset < 64 * 1024) {
+            val length = (0..3).fold(0L) { n, i -> (n shl 8) or (bytes[offset + i].toLong() and 255) }
+            if (length > 64 * 1024 || offset + 12L + length > bytes.size) break
+            val end = offset + 12 + length.toInt()
+            if (String(bytes, offset + 4, 4, Charsets.US_ASCII) == "IEND") {
+                if (end + 188 * 2 < bytes.size && (0..2).all { bytes[end + it * 188] == 0x47.toByte() }) {
+                    return bytes.copyOfRange(end, bytes.size)
+                }
+                break
+            }
+            offset = end
+        }
+        throw IOException("Image response did not contain a transport stream")
     }
 }

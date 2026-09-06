@@ -27,6 +27,7 @@ import com.nsl.downloader.data.DownloadQueueBus
 import com.nsl.downloader.databinding.FragmentBrowserBinding
 import com.nsl.downloader.service.DownloadService
 import com.nsl.downloader.service.HlsDownloader
+import com.nsl.downloader.movies.MovieResolver
 import com.nsl.downloader.service.PlaybackBus
 import com.nsl.downloader.service.PlaybackService
 import com.nsl.downloader.settings.SettingsActivity
@@ -831,10 +832,11 @@ class BrowserFragment : Fragment() {
         val count = currentTab.sniffer.count()
         val youTube = isYouTubePage()
         val vk = isVkPage()
-        if (count > 0 || youTube || vk) {
+        val movie = MovieResolver.isMoviePage(currentWebView.url.orEmpty())
+        if (count > 0 || youTube || vk || movie) {
             binding.fabDownload.show()
             binding.fabDownload.text =
-                if (youTube || vk) getString(R.string.download) else "Download ($count)"
+                if (youTube || vk || movie) getString(R.string.download) else "Download ($count)"
             onFooterCollapsedChanged(
                 (activity as? com.nsl.downloader.MainActivity)?.isFooterCollapsed() ?: false
             )
@@ -865,6 +867,7 @@ class BrowserFragment : Fragment() {
         when {
             url != null && isYouTubePage() -> showYouTubeDialog(url, youTubePageTitle(url))
             url != null && isVkPage() -> showVkDialog(url)
+            url != null && MovieResolver.isMoviePage(url) -> showMovieDialog(url)
             else -> showVideoPicker()
         }
     }
@@ -1196,6 +1199,34 @@ class BrowserFragment : Fragment() {
 
     // ------------------------------------------------------ sniffed videos
 
+    private var movieResolveJob: Job? = null
+
+    private fun showMovieDialog(pageUrl: String) {
+        if (movieResolveJob?.isActive == true) return
+        val tab = currentTab
+        val title = currentWebView.title ?: "Movie"
+        val agent = currentWebView.settings.userAgentString
+        Toast.makeText(requireContext(), "Finding movie streams…", Toast.LENGTH_SHORT).show()
+        movieResolveJob = viewLifecycleOwner.lifecycleScope.launch {
+            val sources = withContext(Dispatchers.IO) {
+                runCatching { MovieResolver(probeClient).resolve(pageUrl, agent) }.getOrDefault(emptyList())
+            }
+            if (!isAdded || currentTab !== tab || currentWebView.url != pageUrl) return@launch
+            if (sources.isEmpty()) {
+                Toast.makeText(requireContext(), "Movie servers are unavailable. Try again later or choose another player on the page.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            fun download(source: MovieResolver.Source) {
+                startDownload(source.url, "$title (${source.label})", HashMap(source.headers))
+            }
+            if (sources.size == 1) download(sources.first())
+            else MaterialAlertDialogBuilder(requireContext())
+                .setTitle("Select movie audio")
+                .setItems(sources.map { it.label }.toTypedArray()) { _, index -> download(sources[index]) }
+                .setNegativeButton(android.R.string.cancel, null).show()
+        }
+    }
+
     /**
      * One detected stream needs no list — it goes straight to the quality step.
      * Several get checkboxes, because a page that exposes more than one is
@@ -1301,7 +1332,9 @@ class BrowserFragment : Fragment() {
         headers: HashMap<String, String>
     ) {
         val real = variants.filter { it.height > 0 }
-        if (real.size <= 1) {
+        // Retain the master when it owns an external audio track. Passing only
+        // its video variant loses the audio group and produces a silent movie.
+        if (real.size <= 1 || variants.any { it.audioUrl != null }) {
             startDownload(playlistUrl, title, headers)
             return
         }
