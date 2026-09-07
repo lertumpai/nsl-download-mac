@@ -40,9 +40,14 @@ data class VideoEntity(
     val canMove: Boolean
         get() = status == DownloadStatus.COMPLETED && localPath.isNotBlank()
 
-    /** Only completed MP4 videos can contain the legacy AAC packaging defect. */
+    /**
+     * Let the media probe decide whether a downloaded video needs repair.
+     * Older HLS downloads can be labelled video/mp2t, a playlist MIME, or
+     * generic binary data, so an exact video/mp4 check excludes valid inputs.
+     * Explicit audio downloads still belong to the audio workflow.
+     */
     val canRepair: Boolean
-        get() = canMove && mimeType.equals("video/mp4", ignoreCase = true)
+        get() = canMove && !mimeType.trim().startsWith("audio/", ignoreCase = true)
 }
 
 /**

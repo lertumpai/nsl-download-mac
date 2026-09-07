@@ -86,7 +86,7 @@ class LibraryFragment : Fragment() {
                     else R.string.library_empty_folder
                 )
                 binding.btnRemoveAll.visibility = if (empty) View.GONE else View.VISIBLE
-                showSelectionBar(list.count { it.selected })
+                showSelectionBar(list)
             }
         }
 
@@ -236,19 +236,21 @@ class LibraryFragment : Fragment() {
      * the pick itself — as does back, which would otherwise leave the screen
      * with rows still ticked behind it.
      */
-    private fun showSelectionBar(count: Int) {
+    private fun showSelectionBar(rows: List<VideoRow>) {
+        val count = rows.count { it.selected }
+        val selectable = rows.count { it.video.canMove }
         val active = count > 0
         binding.selectionBar.visibility = if (active) View.VISIBLE else View.GONE
         backCallback.isEnabled = active
         if (!active) return
         binding.selectionCount.text =
-            getString(R.string.library_selected_count, count, viewModel.selectableCount())
+            getString(R.string.library_selected_count, count, selectable)
         binding.btnSelectionMore.visibility = if (count == 1) View.VISIBLE else View.GONE
         binding.btnSelectionMore.setOnClickListener {
             viewModel.selectedVideos.singleOrNull()?.let { showItemActions(it) }
         }
-        binding.btnSelectAll.isEnabled = count < viewModel.selectableCount()
-        binding.btnRepairSelected.isEnabled = viewModel.selectedVideos.any { it.canRepair }
+        binding.btnSelectAll.isEnabled = count < selectable
+        binding.btnRepairSelected.isEnabled = rows.any { it.selected && it.video.canRepair }
     }
 
     private fun confirmRepairSelection() {
