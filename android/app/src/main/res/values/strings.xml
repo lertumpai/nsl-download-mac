@@ -50,6 +50,9 @@
     <string name="link_share">Share link</string>
     <string name="link_download">Download link</string>
     <string name="link_copied">Link copied</string>
+    <string name="image_open_new_tab">Open image in new tab</string>
+    <string name="image_copy">Copy image address</string>
+    <string name="image_download">Download image</string>
     <string name="opened_in_new_tab">Opened in new tab</string>
 
     <!-- YouTube -->

@@ -40,6 +40,22 @@ object Mp4Muxer {
         { it.setDataSource(context, source, null) },
         { it.setDataSource(context, source, null) }, output, onProgress, checkCancelled)
 
+    /**
+     * Rewrites one already-downloaded file (typically a concatenated transport
+     * stream) into an MP4 without re-encoding, stripping the ADTS headers that
+     * make an MP4 audio track unplayable.
+     *
+     * This is what [repair] does after the fact; running it while the download
+     * is still in hand is what keeps a finished movie playable straight away.
+     * A source with no audio track is remuxed video-only rather than refused —
+     * there is nothing to strip, but the container still has to become MP4.
+     */
+    fun remux(input: File, output: File,
+        onProgress: (Int) -> Unit = {}, checkCancelled: () -> Unit = {}): Boolean = muxSources(
+        { it.setDataSource(input.absolutePath) },
+        { it.setDataSource(input.absolutePath) }, output, onProgress, checkCancelled,
+        requireAudio = false)
+
     fun needsAudioRepair(context: Context, source: Uri): Boolean {
         val extractor = MediaExtractor()
         return try {
@@ -56,7 +72,8 @@ object Mp4Muxer {
     private fun muxSources(
         setVideoSource: (MediaExtractor) -> Unit,
         setAudioSource: (MediaExtractor) -> Unit,
-        output: File, onProgress: (Int) -> Unit, checkCancelled: () -> Unit
+        output: File, onProgress: (Int) -> Unit, checkCancelled: () -> Unit,
+        requireAudio: Boolean = true
     ): Boolean {
         var muxer: MediaMuxer? = null
         val videoExtractor = MediaExtractor()
@@ -68,26 +85,31 @@ object Mp4Muxer {
             setAudioSource(audioExtractor)
 
             val videoTrack = selectTrack(videoExtractor, "video/") ?: return false
-            val audioTrack = selectTrack(audioExtractor, "audio/") ?: return false
+            val audioTrack = selectTrack(audioExtractor, "audio/")
+            if (audioTrack == null && requireAudio) return false
             val videoFormat = videoExtractor.getTrackFormat(videoTrack)
-            val audioFormat = audioExtractor.getTrackFormat(audioTrack)
+            val audioFormat = audioTrack?.let { audioExtractor.getTrackFormat(it) }
             // TS extractors can return several ADTS frames in one sample. The
             // MP4 track must contain individual AAC access units without ADTS.
-            audioFormat.setInteger(MediaFormat.KEY_IS_ADTS, 0)
+            audioFormat?.setInteger(MediaFormat.KEY_IS_ADTS, 0)
 
             muxer = MediaMuxer(output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val outVideo = muxer.addTrack(videoFormat)
-            val outAudio = muxer.addTrack(audioFormat)
+            val outAudio = audioFormat?.let { muxer.addTrack(it) }
             muxer.start()
 
             val bufferSize = maxOf(
-                maxInputSize(videoFormat), maxInputSize(audioFormat), DEFAULT_BUFFER_BYTES
+                maxInputSize(videoFormat), audioFormat?.let { maxInputSize(it) } ?: 0,
+                DEFAULT_BUFFER_BYTES
             )
             val buffer = ByteBuffer.allocate(bufferSize)
-            copyTrack(videoExtractor, videoFormat, muxer, outVideo, buffer, 0, 70,
+            val videoUntil = if (outAudio == null) 100 else 70
+            copyTrack(videoExtractor, videoFormat, muxer, outVideo, buffer, 0, videoUntil,
                 onProgress, checkCancelled)
-            copyTrack(audioExtractor, audioFormat, muxer, outAudio, buffer, 70, 100,
-                onProgress, checkCancelled)
+            if (outAudio != null && audioFormat != null) {
+                copyTrack(audioExtractor, audioFormat, muxer, outAudio, buffer, 70, 100,
+                    onProgress, checkCancelled)
+            }
             checkCancelled()
             // stop() writes the MP4 sample tables. A failure here must not be
             // reported as a completed download with an unplayable container.

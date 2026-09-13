@@ -9,6 +9,8 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.util.Log
 import android.util.Rational
@@ -191,10 +193,7 @@ class BrowserFragment : Fragment() {
                     return true
                 }
             }
-            wv.setOnLongClickListener {
-                val hit = wv.hitTestResult
-                showLinkMenu(hit)
-            }
+            wv.setOnLongClickListener { showLongPressMenu(wv) }
             sniffer.onNewVideo = {
                 if (this === currentTab) {
                     requireActivity().runOnUiThread { updateFab() }
@@ -662,32 +661,70 @@ class BrowserFragment : Fragment() {
     /**
      * Long-pressing a link opens a chooser rather than silently opening a tab,
      * so "open in new tab" is a deliberate choice alongside copy/share/download.
+     *
+     * For a linked image — a thumbnail in a grid, which is most of what gets
+     * long-pressed on a video site — [WebView.HitTestResult.getExtra] hands
+     * back the image's `src`, never the anchor's `href`, so acting on it opens
+     * the picture instead of the page behind it. Only the node itself knows the
+     * link, and it answers asynchronously; the menu waits for that reply.
      */
-    private fun showLinkMenu(hit: WebView.HitTestResult): Boolean {
-        val url = hit.extra
-        val isLink = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
-            hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+    private fun showLongPressMenu(webView: WebView): Boolean {
+        val hit = webView.hitTestResult
+        val isAnchor = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE
+        val isImageAnchor = hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
         val isImage = hit.type == WebView.HitTestResult.IMAGE_TYPE
-        if (url.isNullOrEmpty() || (!isLink && !isImage)) return false
+        if (!isAnchor && !isImageAnchor && !isImage) return false
+
+        if (!isAnchor && !isImageAnchor) {
+            showLinkMenu(linkUrl = null, imageUrl = hit.extra)
+            return true
+        }
+
+        val handler = Handler(Looper.getMainLooper()) { message ->
+            val data = message.data
+            // A plain <a> already had its href in `extra`; falling back to it
+            // keeps the menu working if the node reply comes back empty.
+            val href = data.getString("url")?.takeIf { it.isNotBlank() }
+                ?: hit.extra.takeIf { isAnchor }
+            val image = data.getString("src")?.takeIf { it.isNotBlank() }
+                ?: hit.extra.takeIf { isImageAnchor }
+            showLinkMenu(linkUrl = href, imageUrl = image)
+            true
+        }
+        webView.requestFocusNodeHref(handler.obtainMessage())
+        return true
+    }
+
+    private fun showLinkMenu(linkUrl: String?, imageUrl: String?) {
+        if (!isAdded) return
+        val link = linkUrl?.takeIf { it.isNotBlank() }
+        // A linked image offers its own picture too, but never as the default:
+        // the link is what the long-press was aimed at.
+        val image = imageUrl?.takeIf { it.isNotBlank() && it != link }
+        if (link == null && image == null) return
 
         val actions = buildList<Pair<String, () -> Unit>> {
-            if (isLink) {
-                add(getString(R.string.link_open_new_tab) to { addNewTabFromMenu(url) })
-                add(getString(R.string.link_open_here) to { currentWebView.loadUrl(url) })
+            if (link != null) {
+                add(getString(R.string.link_open_new_tab) to { addNewTabFromMenu(link) })
+                add(getString(R.string.link_open_here) to { currentWebView.loadUrl(link) })
+                add(getString(R.string.link_copy) to { copyToClipboard(link) })
+                add(getString(R.string.link_share) to { shareUrl(link) })
+                add(getString(R.string.link_download) to { downloadLink(link) })
             }
-            add(getString(R.string.link_copy) to { copyToClipboard(url) })
-            add(getString(R.string.link_share) to { shareUrl(url) })
-            add(getString(R.string.link_download) to { downloadLink(url) })
+            if (image != null) {
+                add(getString(R.string.image_open_new_tab) to { addNewTabFromMenu(image) })
+                add(getString(R.string.image_copy) to { copyToClipboard(image) })
+                add(getString(R.string.image_download) to { downloadLink(image) })
+            }
         }
 
         MaterialAlertDialogBuilder(requireContext())
-            .setTitle(url.take(80))
+            .setTitle((link ?: image)!!.take(80))
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions[which].second()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
-        return true
     }
 
     private fun addNewTabFromMenu(url: String) {
