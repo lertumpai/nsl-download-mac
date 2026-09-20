@@ -10,6 +10,8 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.os.PowerManager
+import android.net.wifi.WifiManager
 import androidx.core.app.NotificationCompat
 import com.nsl.downloader.MainActivity
 import com.nsl.downloader.R
@@ -24,6 +26,8 @@ import com.nsl.downloader.util.VideoType
 import com.nsl.downloader.util.detectVideoType
 import com.nsl.downloader.youtube.YouTubeResolver
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
@@ -37,6 +41,7 @@ class DownloadService : Service() {
     companion object {
         const val ACTION_DOWNLOAD = "com.nsl.downloader.DOWNLOAD"
         const val ACTION_RETRY = "com.nsl.downloader.RETRY"
+        const val ACTION_PAUSE = "com.nsl.downloader.PAUSE"
         const val ACTION_CANCEL = "com.nsl.downloader.CANCEL"
         const val ACTION_CANCEL_BATCH = "com.nsl.downloader.CANCEL_BATCH"
         const val EXTRA_VIDEO_ID = "video_id"
@@ -59,7 +64,6 @@ class DownloadService : Service() {
         const val PROGRESS_NOTIF_BASE = 20000 // per-download progress
         const val DONE_NOTIF_BASE = 30000     // per-download complete/failed
         const val BATCH_DONE_NOTIF_BASE = 40000 // per-playlist complete
-        const val MAX_CONCURRENT = 3          // default; Settings can change it
 
         /**
          * Transfers of one download before it is called a failure. Each attempt
@@ -77,6 +81,7 @@ class DownloadService : Service() {
 
         /** Likewise for the retry action, which shares the shade with cancel. */
         private const val RETRY_REQUEST_OFFSET = 200_000L
+        private const val PAUSE_REQUEST_OFFSET = 300_000L
 
         /** Progress is posted at most this often; see the note in [runJob]. */
         private const val PROGRESS_INTERVAL_MS = 300L
@@ -87,6 +92,7 @@ class DownloadService : Service() {
          * Library too, so the registry lives here rather than on the instance.
          */
         private val running = ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
+        private val ownedIds = ConcurrentHashMap.newKeySet<Long>()
 
         /** Ids cancelled before their coroutine had a chance to register. */
         private val cancelledIds: MutableSet<Long> =
@@ -147,7 +153,14 @@ class DownloadService : Service() {
         }
 
         /** Library rows being transferred right now. */
-        fun runningIds(): Set<Long> = running.keys.toSet()
+        fun runningIds(): Set<Long> = ownedIds.toSet() + running.keys
+
+        fun pause(context: Context, videoId: Long) {
+            context.startService(Intent(context, DownloadService::class.java).apply {
+                action = ACTION_PAUSE
+                putExtra(EXTRA_VIDEO_ID, videoId)
+            })
+        }
 
         /**
          * Picks a download that failed back up. The row already carries how it
@@ -155,7 +168,6 @@ class DownloadService : Service() {
          * still on disk, so this continues rather than starts again.
          */
         fun retry(context: Context, videoId: Long) {
-            cancelledIds.remove(videoId)
             runCatching {
                 val intent = Intent(context, DownloadService::class.java).apply {
                     action = ACTION_RETRY
@@ -294,13 +306,19 @@ class DownloadService : Service() {
     private val maxConcurrent: Int get() = prefs.maxConcurrentDownloads
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val commands = Mutex()
+    @Volatile private var destroyed = false
+    private var downloadWakeLock: PowerManager.WakeLock? = null
+    private var downloadWifiLock: WifiManager.WifiLock? = null
     private val client = OkHttpClient.Builder()
-        // Allow many concurrent segment requests across simultaneous downloads.
+        // Dispatcher limits govern asynchronous calls; our blocking calls are
+        // bounded by the download workers. Retain enough idle sockets for ten
+        // six-worker downloads to reuse connections between chunks.
         .dispatcher(Dispatcher().apply {
             maxRequests = 128
             maxRequestsPerHost = 32
         })
-        .connectionPool(ConnectionPool(32, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(60, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
         // Generous per-read window: a genuinely stalled range is retried from
         // where it stopped, but a slow mobile link should not trip this.
@@ -338,12 +356,50 @@ class DownloadService : Service() {
         // Partials used to live in the cache, where the system was free to drop
         // them; nothing there is resumable, so it is only taking up space now.
         scope.launch { runCatching { File(cacheDir, "downloading").deleteRecursively() } }
+        scope.launch {
+            while (isActive) {
+                delay(5 * 60_000L)
+                updateTransferPower()
+            }
+        }
+    }
+
+    /** A foreground notification alone does not keep the CPU awake. */
+    @Suppress("DEPRECATION")
+    private fun updateTransferPower() = synchronized(lock) {
+        if (destroyed || active == 0) {
+            runCatching { if (downloadWakeLock?.isHeld == true) downloadWakeLock?.release() }
+            runCatching { if (downloadWifiLock?.isHeld == true) downloadWifiLock?.release() }
+            return@synchronized
+        }
+        runCatching {
+            if (downloadWakeLock == null) {
+                downloadWakeLock = getSystemService(PowerManager::class.java)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NSL:downloads")
+                    .also { it.setReferenceCounted(false) }
+            }
+            // Bounded lease, renewed while work is active and released on pause/idle.
+            downloadWakeLock?.acquire(10 * 60_000L)
+        }
+        runCatching {
+            if (downloadWifiLock == null) {
+                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                downloadWifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "NSL:downloads")
+                    .also { it.setReferenceCounted(false) }
+            }
+            if (downloadWifiLock?.isHeld != true) downloadWifiLock?.acquire()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_PAUSE) {
+            pauseDownload(intent.getLongExtra(EXTRA_VIDEO_ID, -1L))
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_CANCEL) {
             intent.getLongExtra(EXTRA_VIDEO_ID, -1L).takeIf { it >= 0 }?.let { videoId ->
                 cancelRunning(videoId)
+                removeQueued(videoId)
                 getSystemService(NotificationManager::class.java)
                     .cancel(PROGRESS_NOTIF_BASE + videoId.toInt())
                 refreshForegroundNotification()
@@ -413,10 +469,80 @@ class DownloadService : Service() {
                 stopIfIdle()
                 return START_NOT_STICKY
             }
-            synchronized(lock) { tasks.forEach { pending.addLast(it) } }
-            pump()
+            enqueueNew(tasks)
         }
         return START_NOT_STICKY
+    }
+
+    /** Persist the entire queue before scheduling it, including playlist tails. */
+    private fun enqueueNew(tasks: List<Task>) {
+        synchronized(lock) { loading++ }
+        scope.launch {
+            try {
+                commands.withLock {
+                    val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
+                    for (task in tasks) {
+                        currentCoroutineContext().ensureActive()
+                        if (task.batchId != 0L && DownloadQueueBus.state.value.none { it.id == task.batchId }) continue
+                        val id = dao.insert(VideoEntity(
+                            title = task.title, sourceUrl = task.url, localPath = "",
+                            status = DownloadStatus.PENDING, folderId = task.folderId,
+                            mimeType = if (task.kind == Kind.YOUTUBE && task.ytFormat == YtFormat.MP3)
+                                "audio/mpeg" else "video/mp4",
+                            request = task.toRequest()
+                        ))
+                        ownedIds.add(id)
+                        synchronized(lock) { pending.addLast(task.copy(videoId = id)) }
+                    }
+                }
+            } finally {
+                synchronized(lock) { loading-- }
+                pump()
+            }
+        }
+    }
+
+    private fun pauseDownload(videoId: Long) {
+        synchronized(lock) { loading++ }
+        scope.launch {
+            try {
+                commands.withLock {
+                    val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
+                    // Persist first: process death while sockets unwind is still a pause.
+                    if (dao.pause(videoId) == 0) return@withLock
+                    val queued = synchronized(lock) {
+                        pending.firstOrNull { it.videoId == videoId }?.also { pending.remove(it) }
+                    }
+                    val job = running[videoId]
+                    if (job != null) job.cancel(CancellationException("paused by user"))
+                    else ownedIds.remove(videoId)
+                    queued?.takeIf { it.batchId != 0L }?.let { DownloadQueueBus.withdraw(it.batchId) }
+                    showPausedNotification(videoId)
+                }
+            } finally {
+                synchronized(lock) { loading-- }
+                pump()
+            }
+        }
+    }
+
+    private fun removeQueued(videoId: Long) {
+        val queued = synchronized(lock) {
+            pending.firstOrNull { it.videoId == videoId }?.also { pending.remove(it) }
+        } ?: return
+        ownedIds.remove(videoId)
+        synchronized(lock) { loading++ }
+        scope.launch {
+            try {
+                AppDatabase.getInstance(this@DownloadService).videoDao().deleteById(videoId)
+                DownloadPartials.discard(this@DownloadService, videoId)
+                if (queued.batchId != 0L) DownloadQueueBus.finished(queued.batchId, ok = false)
+            } finally {
+                cancelledIds.remove(videoId)
+                synchronized(lock) { loading-- }
+                pump()
+            }
+        }
     }
 
     /**
@@ -426,30 +552,32 @@ class DownloadService : Service() {
      * get two writers on the same file.
      */
     private fun enqueueRetry(videoId: Long) {
-        if (videoId < 0 || running.containsKey(videoId)) {
+        if (videoId < 0) {
             stopIfIdle()
             return
         }
         synchronized(lock) { loading++ }
         scope.launch {
-            val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
-            val row = dao.getById(videoId)
-                ?.takeIf { it.status != DownloadStatus.COMPLETED && it.sourceUrl.isNotBlank() }
-            // Surfacing the row as active straight away — the transfer itself
-            // may sit in the queue behind other downloads for a while.
-            if (row != null) {
-                dao.update(
-                    row.copy(
-                        status = DownloadStatus.DOWNLOADING,
-                        downloadedAt = System.currentTimeMillis()
-                    )
-                )
+            try {
+                commands.withLock {
+                    val dao = AppDatabase.getInstance(this@DownloadService).videoDao()
+                    if (dao.getById(videoId)?.canResume != true) return@withLock
+                    // A quick Resume tap must wait for the old file writer to exit.
+                    running[videoId]?.join()
+                    val row = dao.getById(videoId)?.takeIf { it.canResume } ?: return@withLock
+                    if (!ownedIds.add(videoId)) return@withLock
+                    if (dao.queueResume(videoId) == 0) {
+                        ownedIds.remove(videoId)
+                        return@withLock
+                    }
+                    cancelledIds.remove(videoId)
+                    getSystemService(NotificationManager::class.java).cancel(DONE_NOTIF_BASE + videoId.toInt())
+                    synchronized(lock) { pending.addLast(row.toTask()) }
+                }
+            } finally {
+                synchronized(lock) { loading-- }
+                pump()
             }
-            synchronized(lock) {
-                loading--
-                if (row != null) pending.addLast(row.toTask())
-            }
-            pump()
         }
     }
 
@@ -480,27 +608,47 @@ class DownloadService : Service() {
 
     /** Launch as many queued downloads as the concurrency limit allows. */
     private fun pump() {
-        val toStart = mutableListOf<Task>()
-        var idle: Boolean
-        synchronized(lock) {
+        if (destroyed) return
+        val idle = synchronized(lock) {
             while (active < maxConcurrent && pending.isNotEmpty()) {
-                toStart.add(pending.removeFirst())
+                val task = pending.removeFirst()
+                val id = task.videoId ?: continue
                 active++
-            }
-            idle = active == 0 && pending.isEmpty() && loading == 0
-        }
-
-        toStart.forEach { task ->
-            scope.launch {
-                try {
-                    runJob(task)
-                } finally {
-                    synchronized(lock) { active-- }
-                    pump()
+                // Enter try/finally before cancellation is possible, then wait
+                // until the registry owns this writer before touching files.
+                val ready = CompletableDeferred<Unit>()
+                val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        ready.await()
+                        runJob(task)
+                    } finally {
+                        val stopped = !currentCoroutineContext().isActive
+                        withContext(NonCancellable) {
+                            if (stopped) {
+                                settleStopped(id)
+                            }
+                            batchOfVideo.remove(id)?.let { batchId ->
+                                if (AppDatabase.getInstance(this@DownloadService).videoDao()
+                                        .getById(id)?.status == DownloadStatus.PAUSED) {
+                                    DownloadQueueBus.withdraw(batchId)
+                                } else DownloadQueueBus.finished(batchId, ok = false)
+                            }
+                        }
+                        ownedIds.remove(id)
+                        running.remove(id)
+                        cancelledIds.remove(id)
+                        synchronized(lock) { active-- }
+                        pump()
+                    }
                 }
+                running[id] = job
+                if (task.batchId != 0L) batchOfVideo[id] = task.batchId
+                ready.complete(Unit)
             }
+            active == 0 && pending.isEmpty() && loading == 0
         }
 
+        updateTransferPower()
         if (idle) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -515,7 +663,10 @@ class DownloadService : Service() {
      * cancel, which discards their partial files and library rows.
      */
     private fun dropBatch(batchId: Long) {
-        synchronized(lock) { pending.removeAll { it.batchId == batchId } }
+        val queuedIds = synchronized(lock) {
+            pending.filter { it.batchId == batchId }.mapNotNull { it.videoId }
+        }
+        queuedIds.forEach { removeQueued(it) }
         DownloadQueueBus.remove(batchId)
         batchOfVideo.entries
             .filter { it.value == batchId }
@@ -539,41 +690,49 @@ class DownloadService : Service() {
 
     // ---------------------------------------------------------------- jobs
 
+    /** Only an explicit Cancel discards bytes; pause and service shutdown keep them. */
+    private suspend fun settleStopped(id: Long) {
+        val dao = AppDatabase.getInstance(this).videoDao()
+        if (dao.getById(id)?.status == DownloadStatus.COMPLETED) return
+        if (cancelledIds.contains(id)) {
+            dao.deleteById(id)
+            DownloadPartials.discard(this, id)
+            getSystemService(NotificationManager::class.java).cancel(DONE_NOTIF_BASE + id.toInt())
+        } else {
+            dao.pause(id)
+            if (!destroyed) showPausedNotification(id)
+        }
+    }
+
+    private suspend fun showPausedNotification(id: Long) {
+        val row = AppDatabase.getInstance(this).videoDao().getById(id)
+            ?.takeIf { it.status == DownloadStatus.PAUSED } ?: return
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_pause)
+            .setContentTitle(row.title)
+            .setContentText(getString(R.string.download_paused))
+            .setContentIntent(contentIntent())
+            .setOnlyAlertOnce(true)
+            .setAutoCancel(true)
+            .addAction(android.R.drawable.ic_media_play, getString(R.string.resume_download), retryIntent(id))
+            .build()
+        getSystemService(NotificationManager::class.java).notify(DONE_NOTIF_BASE + id.toInt(), notification)
+    }
+
     private suspend fun runJob(task: Task) {
         val dao = AppDatabase.getInstance(this).videoDao()
-        // A retry fills the row it failed on: same id, so it also finds the
-        // partial files that attempt left behind.
-        val existing = task.videoId?.let { dao.getById(it) }
-        val entity = existing?.copy(status = DownloadStatus.DOWNLOADING, localPath = "")
-            ?: VideoEntity(
-                title = task.title,
-                sourceUrl = task.url,
-                localPath = "",
-                status = DownloadStatus.DOWNLOADING,
-                folderId = task.folderId,
-                mimeType = if (task.kind == Kind.YOUTUBE && task.ytFormat == YtFormat.MP3)
-                    "audio/mpeg" else "video/mp4",
-                request = task.toRequest()
-            )
-        val id = if (existing != null) {
-            dao.update(entity)
-            existing.id
-        } else {
-            dao.insert(entity)
-        }
+        val id = task.videoId ?: return
+        // Atomic claim: a pause/delete that wins this race must stay paused/deleted.
+        if (dao.startDownload(id) == 0) return
+        val entity = dao.getById(id) ?: return
         val nm = getSystemService(NotificationManager::class.java)
         val progressNotifId = PROGRESS_NOTIF_BASE + id.toInt()
 
-        // Publish this coroutine so the Library and the notification action can
-        // stop it, then honour a cancel that raced the insert.
-        currentCoroutineContext()[kotlinx.coroutines.Job]?.let { running[id] = it }
-        if (task.batchId != 0L) batchOfVideo[id] = task.batchId
         // The batch cancel only sees rows already in [batchOfVideo], so a job
         // that started while it ran has to check for itself.
         val batchGone = task.batchId != 0L &&
             DownloadQueueBus.state.value.none { it.id == task.batchId }
-        if (cancelledIds.remove(id) || batchGone) {
-            running.remove(id)
+        if (cancelledIds.contains(id) || batchGone) {
             batchOfVideo.remove(id)
             dao.deleteById(id)
             DownloadPartials.discard(this, id)
@@ -638,42 +797,25 @@ class DownloadService : Service() {
                     downloaded = true
                     notifyItemDone(task, id, ok = true)
                 } else {
-                    dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
-                    notifyItemDone(task, id, ok = false)
+                    if (dao.failActive(id) > 0) notifyItemDone(task, id, ok = false)
                 }
             }
         } catch (e: CancellationException) {
-            // Deliberate stop. Nothing was produced, so the row goes away —
-            // whether the Library already removed it or the cancel came from
-            // the notification action, which leaves it behind.
-            withContext(NonCancellable) {
-                dao.deleteById(id)
-                DownloadPartials.discard(this@DownloadService, id)
-            }
+            withContext(NonCancellable) { settleStopped(id) }
             throw e
         } catch (e: Exception) {
-            // A cancel does not always arrive as a CancellationException: the
-            // HTTP layer turns a cancelled call into a plain IOException. What
-            // matters is whether this job was stopped, not what was thrown.
             if (!currentCoroutineContext().isActive) {
-                withContext(NonCancellable) {
-                    dao.deleteById(id)
-                    DownloadPartials.discard(this@DownloadService, id)
-                }
+                withContext(NonCancellable) { settleStopped(id) }
             } else {
                 withContext(NonCancellable) {
-                    dao.update(entity.copy(id = id, status = DownloadStatus.FAILED))
+                    if (dao.failActive(id) > 0) notifyItemDone(task, id, ok = false)
                 }
-                notifyItemDone(task, id, ok = false)
             }
         } finally {
-            running.remove(id)
-            cancelledIds.remove(id)
-            batchOfVideo.remove(id)
             // Counts however it ended: a batch that finished with failures must
             // still stop showing as in progress. The last item to land is the
             // one that reports the playlist as a whole.
-            if (task.batchId != 0L) {
+            if (task.batchId != 0L && currentCoroutineContext().isActive && batchOfVideo.remove(id) != null) {
                 DownloadQueueBus.finished(task.batchId, ok = downloaded)
                     ?.takeIf { it.remaining == 0 }
                     ?.let { showBatchDoneNotification(it) }
@@ -1105,6 +1247,14 @@ class DownloadService : Service() {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
     )
 
+    private fun pauseIntent(videoId: Long): PendingIntent = PendingIntent.getService(
+        this, (videoId + PAUSE_REQUEST_OFFSET).toInt(),
+        Intent(this, DownloadService::class.java).apply {
+            action = ACTION_PAUSE
+            putExtra(EXTRA_VIDEO_ID, videoId)
+        }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
     /** Calls off the rest of a playlist straight from the shade. */
     private fun cancelBatchIntent(batchId: Long): PendingIntent = PendingIntent.getService(
         this,
@@ -1140,6 +1290,7 @@ class DownloadService : Service() {
             .setContentText(line)
             .setProgress(100, pct, indeterminate)
             .setContentIntent(contentIntent())
+            .addAction(android.R.drawable.ic_media_pause, getString(R.string.pause_download), pauseIntent(videoId))
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 getString(R.string.cancel_download),
@@ -1235,10 +1386,13 @@ class DownloadService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        destroyed = true
+        updateTransferPower()
         scope.cancel()
-        running.clear()
-        cancelledIds.clear()
-        batchOfVideo.clear()
+        synchronized(lock) {
+            pending.mapNotNull { it.videoId }.forEach { ownedIds.remove(it) }
+            pending.clear()
+        }
         // The queue died with the service, so nothing is left to cancel.
         DownloadQueueBus.clear()
     }

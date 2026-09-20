@@ -7,13 +7,11 @@ import kotlinx.coroutines.flow.StateFlow
  * Live state of the batches (playlists) the download service is working
  * through, keyed by batch id.
  *
- * A library row only appears once its transfer actually starts, so the tail of
- * a 40-item playlist would otherwise be invisible — and impossible to call off
- * — until the service reached it. The Library observes this to show what is
- * still queued and to cancel the whole batch.
+ * The Library observes this to summarize playlist progress and cancel the
+ * whole batch. Individual queued rows and their requests are persisted too.
  *
- * In-memory like [DownloadProgressBus]: the service queue does not survive the
- * process either, so there is nothing to persist.
+ * This summary is in memory. After a process restart, unfinished library rows
+ * are offered individually as paused downloads with their saved requests.
  */
 object DownloadQueueBus {
 
@@ -63,6 +61,15 @@ object DownloadQueueBus {
         if (_state.value.any { it.id == id }) {
             _state.value = _state.value.filterNot { it.id == id }
         }
+    }
+
+    /** A paused item continues independently when resumed, not as a failure. */
+    @Synchronized
+    fun withdraw(id: Long) {
+        val batch = _state.value.firstOrNull { it.id == id } ?: return
+        val updated = batch.copy(total = (batch.total - 1).coerceAtLeast(batch.finished))
+        _state.value = if (updated.remaining == 0) _state.value.filterNot { it.id == id }
+        else _state.value.map { if (it.id == id) updated else it }
     }
 
     @Synchronized

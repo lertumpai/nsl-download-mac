@@ -3,14 +3,21 @@ package com.nsl.downloader.service
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.io.RandomAccessFile
 import java.net.URI
 import javax.crypto.Cipher
@@ -31,9 +38,12 @@ import javax.crypto.spec.SecretKeySpec
  */
 class HlsDownloader(private val client: OkHttpClient) {
 
+    private val segmentFetcher = HlsSegmentFetcher(client)
+
     companion object {
         /** Max segments fetched concurrently. */
         private const val PARALLELISM = 6
+        private const val LOOKAHEAD = PARALLELISM * 2
         private const val BUFFER_SIZE = 1 shl 16 // 64 KB
     }
 
@@ -91,16 +101,20 @@ class HlsDownloader(private val client: OkHttpClient) {
     /**
      * Downloads the media playlist at [mediaUrl] (already a chosen variant) into [output].
      *
-     * Segments are fetched+decrypted **concurrently** (up to [PARALLELISM] at a time) to
+     * Segments are fetched **concurrently** (up to [PARALLELISM] at a time) to
      * hide per-segment latency, then written to disk **in playlist order** so the result
-     * is a valid contiguous .ts. Memory is bounded to one batch of segments.
+     * is a valid contiguous .ts. A rolling window keeps workers busy past a slow
+     * segment, with at most [LOOKAHEAD] fetched/in-flight segments on disk.
+     * Transfer and decryption use fixed buffers so ten movies do not retain
+     * dozens of complete segments in the Android heap.
      *
      * A failed run leaves its segments in place and a [ResumeLog] record beside
      * them, so retrying continues from the next segment rather than re-fetching
      * hundreds of them. The record is discarded by the caller once the bytes are
      * no longer wanted; see [DownloadPartials].
      *
-     * @return true on success. onProgress reports (percent 0..100, total bytes written).
+     * @return true on success. Progress reports committed segment percent and
+     * received bytes (including retry traffic) for a live network speed meter.
      */
     suspend fun download(
         mediaUrl: String,
@@ -120,31 +134,62 @@ class HlsDownloader(private val client: OkHttpClient) {
         val resumed = resume(output, segments.size)
         var written = resumed.bytes
         var done = resumed.segments
+        val staging = File(output.parentFile, "${output.name}.segments")
+        // An interrupted process may have left speculative segments behind.
+        staging.deleteRecursively()
         if (done >= segments.size) return@coroutineScope output.length() > 0
+        if (!staging.mkdirs()) return@coroutineScope false
 
-        onProgress(done * 100 / segments.size, written)
-        FileOutputStream(output, done > 0).buffered(BUFFER_SIZE).use { out ->
-            // Process in batches so at most PARALLELISM segments are in flight / in memory.
-            for (batch in segments.drop(done).chunked(PARALLELISM)) {
-                val fetched = batch.map { seg ->
-                    async(Dispatchers.IO) {
-                        val data = fetchSegment(seg.url, headers) ?: return@async null
-                        val decoded = if (seg.key != null) decryptAes128(data, seg.key, seg.iv, seg.seq) else data
-                        unwrapSegment(decoded)
+        val reportLock = Any()
+        var received = written
+        var committed = done
+        val reportBytes: (Int) -> Unit = { count ->
+            synchronized(reportLock) {
+                received += count
+                onProgress(committed * 100 / segments.size, received)
+            }
+        }
+        reportBytes(0)
+        val permits = Semaphore(PARALLELISM)
+        val pending = ArrayDeque<Deferred<File?>>()
+        var next = done
+        fun fillWindow() {
+            while (next < segments.size && pending.size < LOOKAHEAD) {
+                val index = next++
+                val seg = segments[index]
+                pending.addLast(async(Dispatchers.IO) {
+                    permits.withPermit {
+                        val file = File(staging, "$index")
+                        if (segmentFetcher.fetch(seg.url, headers, file, reportBytes)) file else null
                     }
-                }.awaitAll()
-
-                for (bytes in fetched) {
-                    bytes ?: return@coroutineScope false  // a segment failed
-                    out.write(bytes)
-                    written += bytes.size
+                })
+            }
+        }
+        try {
+            fillWindow()
+            FileOutputStream(output, done > 0).buffered(BUFFER_SIZE).use { out ->
+                while (pending.isNotEmpty()) {
+                    val file = pending.first().await() ?: return@coroutineScope false
+                    pending.removeFirst()
+                    written += appendSegment(file, segments[done], out)
+                    file.delete()
                     done++
-                    onProgress(done * 100 / segments.size, written)
+                    // Record only a flushed, contiguous prefix. Out-of-order
+                    // results never become part of a resume checkpoint.
+                    out.flush()
+                    ResumeLog.write(output, ResumeState.Segments(done, written, segments.size))
+                    synchronized(reportLock) {
+                        committed = done
+                        onProgress(committed * 100 / segments.size, received)
+                    }
+                    fillWindow()
                 }
-                // One record per batch, not per segment: the buffer has to be
-                // pushed to the file before the count can claim those bytes.
-                out.flush()
-                ResumeLog.write(output, ResumeState.Segments(done, written, segments.size))
+            }
+        } finally {
+            pending.forEach { it.cancel() }
+            withContext(NonCancellable) {
+                pending.toList().joinAll()
+                staging.deleteRecursively()
             }
         }
         output.length() > 0
@@ -207,26 +252,6 @@ class HlsDownloader(private val client: OkHttpClient) {
         }
     }.getOrNull()
 
-    /**
-     * Same as [fetchBytes], but abandons the socket the moment the download is
-     * cancelled instead of running the segment to completion first.
-     */
-    private suspend fun fetchSegment(url: String, headers: Map<String, String>): ByteArray? =
-        run {
-            repeat(3) { attempt ->
-                try {
-                    val bytes = useCall(client.newCall(buildRequest(url, headers))) { r ->
-                        if (!r.isSuccessful) null else r.body?.bytes()
-                    }
-                    if (bytes != null && bytes.isNotEmpty()) return@run bytes
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: IOException) { }
-                if (attempt < 2) delay(500L * (attempt + 1))
-            }
-            null
-        }
-
     private fun parseMediaPlaylist(mediaUrl: String, headers: Map<String, String>): List<Segment>? {
         val text = fetchText(mediaUrl, headers) ?: return null
         if (!text.trimStart().startsWith("#EXTM3U")) return null
@@ -278,7 +303,40 @@ class HlsDownloader(private val client: OkHttpClient) {
         return segments
     }
 
-    private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray?, seq: Int): ByteArray {
+    private suspend fun appendSegment(file: File, segment: Segment, out: OutputStream): Long {
+        val decoded = if (segment.key != null) {
+            File(file.parentFile, "${file.name}.decoded").also {
+                decryptAes128(file, it, segment.key, segment.iv, segment.seq)
+            }
+        } else file
+        try {
+            return decoded.inputStream().buffered(BUFFER_SIZE).use { input ->
+                // unwrapSegment only inspects PNG chunks starting below 64 KB,
+                // each at most 64 KB, followed by three TS sync bytes.
+                val prefix = ByteArray(minOf(decoded.length(), 128L * 1024 + 400).toInt())
+                var size = 0
+                while (size < prefix.size) {
+                    val count = input.read(prefix, size, prefix.size - size)
+                    if (count < 0) throw IOException("Incomplete staged segment")
+                    size += count
+                }
+                val unwrapped = unwrapSegment(prefix)
+                out.write(unwrapped)
+                val buffer = ByteArray(BUFFER_SIZE)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    out.write(buffer, 0, count)
+                }
+                decoded.length() - (prefix.size - unwrapped.size)
+            }
+        } finally {
+            if (decoded != file) decoded.delete()
+        }
+    }
+
+    private suspend fun decryptAes128(source: File, target: File, key: ByteArray, iv: ByteArray?, seq: Int) {
         val ivBytes = iv ?: ByteArray(16).also { b ->
             // Default IV = segment sequence number, big-endian in the low 4 bytes
             b[12] = (seq ushr 24).toByte()
@@ -286,13 +344,27 @@ class HlsDownloader(private val client: OkHttpClient) {
             b[14] = (seq ushr 8).toByte()
             b[15] = seq.toByte()
         }
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ivBytes))
-        return runCatching { cipher.doFinal(data) }.getOrElse {
-            // Some streams use NoPadding; retry
-            val c2 = Cipher.getInstance("AES/CBC/NoPadding")
-            c2.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ivBytes))
-            c2.doFinal(data)
+        suspend fun decode(padding: String) {
+            val cipher = Cipher.getInstance("AES/CBC/$padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ivBytes))
+            source.inputStream().use { input ->
+                target.outputStream().use { out ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        cipher.update(buffer, 0, count)?.let { out.write(it) }
+                    }
+                    out.write(cipher.doFinal())
+                }
+            }
+        }
+        try {
+            decode("PKCS5Padding")
+        } catch (_: javax.crypto.BadPaddingException) {
+            // Some streams omit padding. Rewrite the staging file before use.
+            decode("NoPadding")
         }
     }
 

@@ -327,7 +327,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Settles downloads the app was killed in the middle of. Their rows still
      * read as in progress but nothing is transferring them, so they are marked
-     * failed — which is what offers them back to the user as resumable; the
+     * paused — which offers them back to the user as resumable; the
      * bytes they got are untouched. Rows the service is genuinely still working
      * on are left alone, and partials whose row is gone are swept up.
      */
@@ -336,7 +336,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
                 val dao = AppDatabase.getInstance(app).videoDao()
-                dao.failInterrupted(DownloadService.runningIds().toList())
+                dao.pauseInterrupted(DownloadService.runningIds().toList())
                 DownloadPartials.sweep(app, dao.observeAllOnce().map { it.id }.toSet())
             }
         }

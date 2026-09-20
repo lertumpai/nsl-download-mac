@@ -39,7 +39,8 @@ class LibraryFragment : Fragment() {
         onClick = { openPlayer(it) },
         onDelete = { confirmDeleteSingle(it) },
         onLongClick = { showItemActions(it) },
-        onResume = { confirmResume(it) },
+        onResume = { viewModel.resumeVideo(it) },
+        onPause = { viewModel.pauseVideo(it) },
         onToggleSelect = { viewModel.toggleSelection(it) }
     )
 

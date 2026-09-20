@@ -31,7 +31,10 @@ data class VideoEntity(
      * service reads that back off [sourceUrl] instead of refusing them.
      */
     val canResume: Boolean
-        get() = status == DownloadStatus.FAILED && sourceUrl.isNotBlank()
+        get() = (status == DownloadStatus.FAILED || status == DownloadStatus.PAUSED) && sourceUrl.isNotBlank()
+
+    val canPause: Boolean
+        get() = status == DownloadStatus.DOWNLOADING || status == DownloadStatus.PENDING
 
     /**
      * Only a finished download has a file to put in a folder, so only those can
@@ -70,4 +73,4 @@ data class DownloadRequest(
     val folderName: String? = null
 )
 
-enum class DownloadStatus { PENDING, DOWNLOADING, COMPLETED, FAILED }
+enum class DownloadStatus { PENDING, DOWNLOADING, PAUSED, COMPLETED, FAILED }

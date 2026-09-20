@@ -62,8 +62,8 @@ class Prefs(context: Context) {
 
     /** How many downloads may transfer at once; the rest queue. */
     var maxConcurrentDownloads: Int
-        get() = sp.getInt(KEY_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT).coerceIn(1, 6)
-        set(value) = sp.edit().putInt(KEY_MAX_CONCURRENT, value.coerceIn(1, 6)).apply()
+        get() = sp.getInt(KEY_MAX_CONCURRENT, MAX_CONCURRENT_DOWNLOADS).coerceIn(1, MAX_CONCURRENT_DOWNLOADS)
+        set(value) = sp.edit().putInt(KEY_MAX_CONCURRENT, value.coerceIn(1, MAX_CONCURRENT_DOWNLOADS)).apply()
 
     /** Whole-app download cap in bytes/sec; 0 is unlimited. */
     var speedLimitBytesPerSecond: Long
@@ -99,9 +99,10 @@ class Prefs(context: Context) {
         const val KEY_SPEED_LIMIT = "speed_limit"
         const val KEY_DOWNLOAD_FOLDER = "download_folder"
         const val KEY_GALLERY_HIDDEN_ROOT = "gallery_hidden_root"
-        const val DEFAULT_MAX_CONCURRENT = 3
     }
 }
+
+const val MAX_CONCURRENT_DOWNLOADS = 10
 
 /**
  * Pushes the stored download settings into the objects that enforce them.

@@ -19,15 +19,33 @@ of any content/streaming type, and **play them back** with a gesture-driven play
   **cookies**. This is what makes CDN-protected sites (e.g. **missav**) work instead of
   returning `403 Forbidden`.
 - **Download engine** (`DownloadService`, a foreground service with a progress notification):
-  - Direct files → streamed to disk with OkHttp.
+  - Direct files → six concurrent byte-range workers where supported, with bounded
+    requests, connection reuse, and resume from the last written byte after a stall.
+    Servers without range support use a sequential transfer.
   - **HLS** → native downloader (`HlsDownloader`): downloads the chosen variant,
     parses the media playlist, **decrypts AES-128 segments**, and concatenates to a
-    playable `.ts`. No ffmpeg dependency. Segments are fetched **6-at-a-time
-    concurrently** (then written in playlist order) to hide per-segment latency;
-    OkHttp is tuned for parallel same-host requests.
+    playable `.ts`. No ffmpeg dependency. Six network workers use a rolling window
+    of up to 12 segments, so a slow segment does not block the next batch. Temporary
+    files and streamed decryption keep memory bounded; output stays in playlist order.
   - DASH/progressive → fetched directly (64 KB buffered I/O).
-- **Concurrent downloads** — up to **3 videos download at once** (`MAX_CONCURRENT`), the rest
-  queue. Each shows its own progress; a foreground summary notification counts the active ones.
+- **Concurrent downloads** — choose **1–10 videos at once** in Settings; the rest queue.
+  New installs default to 10, while existing saved choices are preserved. Each shows
+  its own progress; a foreground summary notification counts the active ones.
+- **Pause and resume** — one-tap controls in the Library and download notification.
+  Pausing preserves the request and completed chunks in app-private storage. Queued
+  downloads are saved too. After an app restart, unfinished items appear as Paused
+  and can continue from their last checkpoint. Cancel/Remove discards saved progress.
+- **Bandwidth** — Unlimited is the default. An optional app-wide cap applies to both
+  direct and HLS transfers. Waiting for bandwidth suspends workers without blocking
+  IO threads. HLS speed updates as bytes arrive, even while an earlier segment is slow.
+- **HLS connection recovery** — recover idle or very slow segment responses, resume
+  their partial bytes when ranges are supported, and temporarily use separate HTTP/1.1
+  connections after transport failures. A shared limit of 12 active segment requests
+  per host prevents ten downloads from opening 60 requests to the same CDN. HTTP
+  429/503 responses trigger shared backoff, including the server's Retry-After.
+- **Background transfers** — bounded CPU wake-lock leases and a Wi-Fi lock are held
+  while downloads are active and released when all work pauses/finishes or the
+  service stops. They do not override Android's network or power restrictions.
 - **Live progress & speed** — each downloading item shows a progress bar with **percent and
   download speed** (e.g. `40% • 721 KB/s`) in the Library, and a per-download notification.
   Progress is published through an in-memory `DownloadProgressBus` (not Room, to avoid disk

@@ -21,6 +21,7 @@ class VideoAdapter(
     private val onDelete: (VideoEntity) -> Unit,
     private val onLongClick: (VideoEntity) -> Unit,
     private val onResume: (VideoEntity) -> Unit,
+    private val onPause: (VideoEntity) -> Unit,
     private val onToggleSelect: (VideoEntity) -> Unit
 ) : ListAdapter<VideoRow, VideoAdapter.VH>(DIFF) {
 
@@ -67,7 +68,8 @@ class VideoAdapter(
             checkbox.isEnabled = selectable
             checkbox.isChecked = row.selected
             btnResume.visibility =
-                if (video.canResume && !row.selectionActive && !row.repairBatchActive) View.VISIBLE else View.GONE
+                if ((video.canResume || video.canPause) && !row.selectionActive && !row.repairBatchActive) View.VISIBLE else View.GONE
+            btnResume.setText(if (video.canPause) R.string.pause_download else R.string.resume_download)
             btnDelete.visibility =
                 if (row.selectionActive || row.repairBatchActive) View.GONE else View.VISIBLE
 
@@ -109,6 +111,11 @@ class VideoAdapter(
                     statusBadge.text = root.context.getString(R.string.library_failed)
                     root.alpha = 0.6f
                 }
+                DownloadStatus.PAUSED -> {
+                    statusBadge.visibility = View.VISIBLE
+                    statusBadge.setText(R.string.download_paused)
+                    root.alpha = 0.85f
+                }
                 DownloadStatus.PENDING -> {
                     statusBadge.visibility = View.VISIBLE
                     statusBadge.text = "Pending"
@@ -132,7 +139,7 @@ class VideoAdapter(
 
             // Whatever the failed attempt fetched is still on disk, so a failed
             // row is an offer to carry on, not a dead end.
-            btnResume.setOnClickListener { onResume(video) }
+            btnResume.setOnClickListener { if (video.canPause) onPause(video) else onResume(video) }
             root.setOnClickListener {
                 when {
                     row.repairBatchActive -> Unit

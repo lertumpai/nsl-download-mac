@@ -162,6 +162,8 @@
     <string name="notif_download_done">Download complete</string>
     <string name="notif_download_failed">Download failed</string>
     <string name="resume_download">Resume</string>
+    <string name="pause_download">Pause</string>
+    <string name="download_paused">Paused · progress saved</string>
     <string name="library_failed">Failed</string>
     <string name="library_resume_title">Resume download</string>
     <string name="library_resume_message">Continue downloading “%1$s” from where it stopped?</string>

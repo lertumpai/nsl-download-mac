@@ -2,6 +2,8 @@ package com.nsl.downloader.service
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.Dns
@@ -78,6 +80,54 @@ class RangedDownloaderTest {
         server = FakeRangeServer(payloadOf(12 * 1024 * 1024), truncateFirst = 3)
         assertTrue(download())
         assertArrayEquals(server.payload, output.readBytes())
+    }
+
+    @Test
+    fun `a stalled range rotates its connection and keeps received bytes`() = runBlocking {
+        server = FakeRangeServer(payloadOf(8 * 1024 * 1024), stallFirstChunk = true)
+        withTimeout(5000) {
+            assertTrue(RangedDownloader(OkHttpClient(), rangeRequestTimeoutMs = 250)
+                .download(server.url, output, emptyMap()) { _, _ -> })
+        }
+        assertArrayEquals(server.payload, output.readBytes())
+        assertTrue("stalled chunk restarted instead of resuming",
+            server.rangeStarts.any { it % (2 * 1024 * 1024) != 0 })
+    }
+
+    @Test
+    fun `incorrect range offsets are rejected before writing`() {
+        server = FakeRangeServer(payloadOf(8 * 1024 * 1024), misplaceFirstChunk = true)
+        assertTrue(download())
+        assertArrayEquals(server.payload, output.readBytes())
+    }
+
+    @Test
+    fun `browser compression and stale range headers cannot alter the output`() = runBlocking {
+        server = FakeRangeServer(payloadOf(4 * 1024 * 1024 + 17))
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("identity", chain.request().header("Accept-Encoding"))
+            chain.proceed(chain.request())
+        }.build()
+        assertTrue(RangedDownloader(client).download(server.url, output,
+            mapOf("Accept-Encoding" to "gzip", "Range" to "bytes=100-200")) { _, _ -> })
+        assertArrayEquals(server.payload, output.readBytes())
+    }
+
+    @Test
+    fun `ten simultaneous files share the engine without corrupting output`() = runBlocking {
+        server = FakeRangeServer(payloadOf(4 * 1024 * 1024 + 37))
+        val engine = downloader()
+        val files = (0 until 10).map { File.createTempFile("ranged-ten", ".bin") }
+        try {
+            withTimeout(15000) {
+                files.map { file -> async(kotlinx.coroutines.Dispatchers.IO) {
+                    engine.download(server.url, file, emptyMap()) { _, _ -> }
+                } }.awaitAll().forEach { assertTrue(it) }
+            }
+            files.forEach { assertArrayEquals(server.payload, it.readBytes()) }
+        } finally {
+            files.forEach { it.delete(); ResumeLog.clear(it) }
+        }
     }
 
     /** A server that ignores Range still works, via the single-stream path. */
@@ -238,7 +288,9 @@ class RangedDownloaderTest {
         truncateFirst: Int = 0,
         truncateWholeFirst: Int = 0,
         /** Drip the body out so a transfer stays in flight long enough to cancel. */
-        private val trickle: Boolean = false
+        private val trickle: Boolean = false,
+        private val stallFirstChunk: Boolean = false,
+        private val misplaceFirstChunk: Boolean = false
     ) : AutoCloseable {
 
         private val socket = ServerSocket(0)
@@ -252,6 +304,9 @@ class RangedDownloaderTest {
         val wholeRequests = AtomicInteger(0)
         /** Where the most recent range request asked to start. */
         val lastRangeStart = AtomicInteger(0)
+        val rangeStarts = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+        private val stalled = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val misplaced = java.util.concurrent.atomic.AtomicBoolean(false)
 
         /** Serve [count] more requests, then drop every connection unanswered. */
         fun failAfter(count: Int) {
@@ -323,9 +378,17 @@ class RangedDownloaderTest {
 
             rangeRequests.incrementAndGet()
             val start = spec.substringBefore('-').toInt()
+            rangeStarts.add(start)
             lastRangeStart.set(start)
             val end = spec.substringAfter('-').toIntOrNull() ?: (payload.size - 1)
             val length = end - start + 1
+            if (misplaceFirstChunk && length > 1 && misplaced.compareAndSet(false, true)) {
+                out.write(header("206 Partial Content", "Content-Length: $length",
+                    "Content-Range: bytes ${start + 1}-${end + 1}/${payload.size}"))
+                out.write(ByteArray(length))
+                out.flush()
+                return
+            }
             if (queryRange != null) {
                 queryRangeRequests.incrementAndGet()
                 largestQueryRange.updateAndGet { previous -> maxOf(previous, length) }
@@ -338,6 +401,12 @@ class RangedDownloaderTest {
                     "Accept-Ranges: bytes"
                 )
             )
+            if (stallFirstChunk && length > 65536 && stalled.compareAndSet(false, true)) {
+                out.write(payload, start, 65536)
+                out.flush()
+                Thread.sleep(2500)
+                return
+            }
             // Cut some responses short so the client has to resume mid-chunk.
             val send = if (truncationsLeft.getAndDecrement() > 0) length / 2 else length
             if (trickle) {

@@ -1,13 +1,16 @@
 package com.nsl.downloader.util
 
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+
 /**
  * App-wide download speed cap, shared by every transfer in flight.
  *
  * A token bucket rather than a per-connection cap: the setting the user picks is
  * a budget for the whole app, and the ranged downloader alone opens half a dozen
- * sockets. [acquire] is called from the transfer loops on IO threads and simply
- * sleeps when the budget is spent — a few milliseconds at a time, so a cancel is
- * never left waiting for long.
+ * sockets. [acquire] suspends when the budget is spent, freeing the IO thread
+ * for other transfers and observing cancellation immediately.
  */
 object RateLimiter {
 
@@ -31,12 +34,14 @@ object RateLimiter {
     private const val MAX_SLEEP_MS = 50L
 
     /**
-     * Blocks until [bytes] fit in the budget. Returns immediately when no limit
+     * Suspends until [bytes] fit in the budget. Returns immediately when no limit
      * is set, which is the default and the hot path.
      */
-    fun acquire(bytes: Int) {
+    suspend fun acquire(bytes: Int) {
         if (bytes <= 0) return
+        var remaining = bytes.toDouble()
         while (true) {
+            currentCoroutineContext().ensureActive()
             val limit = bytesPerSecond
             if (limit <= 0) return
             val waitMs = synchronized(lock) {
@@ -45,21 +50,20 @@ object RateLimiter {
                 val elapsed = (now - lastRefill) / 1_000_000_000.0
                 lastRefill = now
                 available = (available + elapsed * limit).coerceAtMost(limit * BURST_SECONDS)
-                if (available >= bytes) {
-                    available -= bytes
+                // Consume incrementally: a buffer larger than the burst
+                // allowance must still be able to make progress.
+                val granted = minOf(available, remaining)
+                available -= granted
+                remaining -= granted
+                if (remaining <= 0) {
                     0L
                 } else {
                     // Time to earn the shortfall, capped so cancels stay responsive.
-                    (((bytes - available) / limit) * 1000).toLong().coerceIn(1L, MAX_SLEEP_MS)
+                    ((remaining / limit) * 1000).toLong().coerceIn(1L, MAX_SLEEP_MS)
                 }
             }
             if (waitMs == 0L) return
-            try {
-                Thread.sleep(waitMs)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return
-            }
+            delay(waitMs)
         }
     }
 }

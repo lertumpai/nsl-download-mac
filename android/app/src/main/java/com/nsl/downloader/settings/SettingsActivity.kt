@@ -7,6 +7,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.nsl.downloader.R
 import com.nsl.downloader.databinding.ActivitySettingsBinding
 import com.nsl.downloader.util.MediaStorage
+import com.nsl.downloader.util.MAX_CONCURRENT_DOWNLOADS
 import com.nsl.downloader.util.PlaybackMode
 import com.nsl.downloader.util.Prefs
 import com.nsl.downloader.util.applyDownloadSettings
@@ -29,7 +30,7 @@ class SettingsActivity : AppCompatActivity() {
         0L, 256L shl 10, 512L shl 10, 1L shl 20, 2L shl 20, 5L shl 20, 10L shl 20
     )
 
-    private val concurrentOptions = listOf(1, 2, 3, 4, 5, 6)
+    private val concurrentOptions = (1..MAX_CONCURRENT_DOWNLOADS).toList()
     private val bitrateOptions = listOf(128, 192, 320)
 
     override fun onCreate(savedInstanceState: Bundle?) {

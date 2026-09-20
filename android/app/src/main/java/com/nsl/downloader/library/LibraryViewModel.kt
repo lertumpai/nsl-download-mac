@@ -281,6 +281,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         DownloadService.retry(getApplication(), video.id)
     }
 
+    fun pauseVideo(video: VideoEntity) {
+        if (video.canPause) DownloadService.pause(getApplication(), video.id)
+    }
+
     /** Remove a single video and ALL its files (video + thumbnail). */
     fun removeVideo(video: VideoEntity) {
         stopIfDownloading(video)
@@ -314,7 +318,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      * finished file into a library that no longer expects it.
      */
     private fun stopIfDownloading(video: VideoEntity) {
-        if (video.status == DownloadStatus.DOWNLOADING || video.status == DownloadStatus.PENDING) {
+        if (video.canPause || video.id in DownloadService.runningIds()) {
             DownloadService.cancel(getApplication(), video.id)
         }
     }
